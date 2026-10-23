@@ -20,7 +20,7 @@ Living document. Numbers are measured, not assumed; each one names its setup.
 | `mapleocr-cli` | M0 | `targets`, `select`, `capture-dataset`, `bench capture` |
 | `mapleocr-imgproc` | M1 | image views, resampling, NCC template search, xxh3 ROI hashing |
 | `mapleocr-layout` | M1 | YAML ROI registry (anchor-relative), auto-calibration |
-| `mapleocr-recog` | M1 (fallback OCR); M2–M4 | `Recognizer` trait, `Reading`, preprocessing; glyph, sprite-digit, icon, CRNN later |
+| `mapleocr-recog` | M1–M2 | `Recognizer` trait, `Reading`, preprocessing, glyph matcher, Windows OCR; icon and CRNN later |
 | `mapleocr-semantic` | M1 (maps) | parsing + fuzzy snapping against user-built data packs |
 | `mapleocr-core` | M1 | `MapleOcr` runtime: capture thread, dirty detection, cache, recognition worker |
 | `mapleocr-py`, `mapleocr-server` | M5 | PyO3 bindings, WebSocket + shared memory + C ABI |
@@ -154,6 +154,101 @@ Known gaps (prototype): anchor-loss detection (only resize triggers
 recalibration), job images are allocated per change (not pooled), and the
 results ring buffer and shared-memory feed are M5. The 20 fixtures come from one
 session and four maps, so accuracy will need a broader set.
+
+## M2: the readable UI (glyph tier, windows, catalogue)
+
+### What is readable today
+
+| ROI | engine | value | status (16 held-out frames + live) |
+|---|---|---|---|
+| `map_name` | Windows OCR + map pack | `{region, name}` | 100% |
+| `level` | glyph, learned `status_level` | number | 100%; **new digits must be taught** |
+| `job`, `character_name` | glyph, GDI Arial 12 | text | 100% |
+| `hp`, `mp` | glyph, learned `status_digits` | `{current, max}` | 100% |
+| `exp` | glyph, learned `status_digits` | `{value, percent}` | 100% (incl. `10,105`) |
+| `npc_name` | glyph, GDI Arial 11, `band` crop | text | 100% (2 open frames) |
+| `npc_dialogue` | glyph, GDI Arial 12, presence anchor | `{text, options}` | 100% (2 open frames) |
+| `quest_helper` | glyph, GDI Arial 11 + 11 bold | lines | **beta**: regular lines good; bold titles break on dark scenery |
+| `chat` | Windows OCR on raw pixels | lines | **beta**: readable, noisy on busy backgrounds |
+| `screen` (opt-in) | Windows OCR, whole client | lines with boxes | universal fallback, 230–270 ms |
+
+Not yet: item tooltips (follow the cursor), inventory/equipment/stat/skill
+windows (movable), damage numbers, shops. See "Next" below.
+
+### Glyph tier
+Fixed-font UI text is read on the **native grid**:
+
+1. Color-key the ROI (`luma`, `dark`, `white`, `#rrggbb`, `raw`).
+2. Area-resample it back by the UI scale (×1.5625 at 1200 px). The sub-pixel
+   grid phase is found once per ROI by maximizing variance over 16 quarter-pixel
+   phases, then cached until the geometry changes. Without it, 1-px strokes fall
+   between native pixels and 5/9 and 6/8 become indistinguishable.
+3. Binarize halfway between background and ink. 0.4 merged neighbouring
+   digits; 0.5 keeps them apart and keeps 1-px dots.
+4. Split into lines (empty rows) and glyphs (empty columns), after erasing
+   dashed underlines. A dashed underline is a 1-px-tall row of equal runs at an
+   equal pitch; monospaced digits also have regular runs, but they're stacked,
+   so they're kept.
+5. Match each glyph by IoU with ±1 px tolerance. Two-segment merges handle the
+   game's notched bold `n`/`m`/`h`. A DP split handles touching letters, using
+   pair glyphs (`ft`, `tt`, …) rendered by GDI.
+
+**Atlases** are built locally:
+- `gdi:<face>:<px>[:bold]`: rendered 1-bit through GDI from the user's
+  system font, plus every letter pair GDI draws touching. Accept IoU ≥ 0.70.
+- `learned:<name>`: sprite glyphs cut from the user's own captures with
+  `mapleocr atlas learn` (`--image` or live). Accept IoU ≥ 0.85, so an unlearned
+  `8` can't pass as a `5`. Each character may hold variants (sub-pixel phase
+  differs by position). Learning refuses lines whose labels look shifted (a
+  segment already matches a different character at ≥ 0.95) and size-inconsistent
+  variants.
+- A number containing an unknown glyph is reported as text with confidence
+  0.2, **never as a guessed number**.
+
+### Optional windows (presence anchors)
+An anchor with `optional: true` (the NPC dialogue's left border) is checked
+before its window is read. The capture thread copies only the anchor strip,
+a few hundred pixels: it tests the exact expected position first, falls back to
+a ±3 px search, and re-checks a closed window every 4th frame. While the window is
+closed its ROIs report `Hidden`, and their pixels never leave the GPU. Their
+templates are learned from a saved frame with `mapleocr calibrate --learn-anchor`.
+
+### Content-aware crops
+- `panel`: stop where the panel color ends (minimap width varies).
+- `band:#rrggbb`: keep the tallest band of rows dominated by a color (the NPC
+  name plate's height depends on the portrait).
+
+### CPU: what it cost and what fixed it
+Measured with `mapleocr watch` (which prints a per-thread breakdown) at
+~54–56 fps, all default ROIs:
+
+| change | CPU, % of one core |
+|---|---|
+| first live run, all ROIs | 73 |
+| glyph cache on binarized-bitmap hash; rate limits (chat 300 ms, quest 500 ms) | 35–39 |
+| presence on the capture thread; strict learned threshold | 29–33 |
+| copy only what is needed: closed windows and not-yet-due ROIs stay on the GPU | 27–32 |
+| phase cached per ROI (quest helper 24–47 → 3–5 ms) | 19–21 |
+| `screen` really opt-in (it was copying + hashing the full frame every frame) | 8.7–10.4 |
+| `Map` polls without waiting, yields ≤ 1 ms, then sleeps (staging p50 0.48 ms) | **11.6–12.5** |
+
+Blocking `Map` made the NVIDIA driver busy-wait while the GPU rendered the
+game. Pure sleeping cut CPU most but raised staging latency to 2.5 ms p50.
+Latency comes first, so the yield window stays. Remaining cost is mostly chat
+OCR (~14 ms per read, ≤ 3.3 Hz). The 10%-of-a-core target is slightly exceeded
+with every ROI on.
+
+### Next
+- **Tooltips**: they follow the cursor, so they need a detector. Plan:
+  border/background color search on a downscaled frame (GPU mip), then glyph
+  reading inside with GDI Arial 12 (tooltip text was identified as Arial 12).
+- **Movable windows** (inventory, equipment, stats, skills, quest log):
+  title-bar templates searched at low rate on the downscaled frame, then
+  window-relative ROIs. Inventory slots use the icon matcher.
+- **Damage numbers**: sprite matcher with color classes and tracking.
+- **Quest helper bold on dark scenery**: learn the bold glyphs from captures
+  (`learned:`) instead of GDI, or key on the panel tint.
+- **Chat**: glyph tier per chat color instead of OCR (lower CPU, higher accuracy).
 
 ## Font identification (M0)
 

@@ -570,6 +570,7 @@ dependencies = [
  "mapleocr-imgproc",
  "mapleocr-semantic",
  "serde",
+ "serde_json",
  "thiserror",
  "windows",
 ]

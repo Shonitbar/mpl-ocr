@@ -9,9 +9,11 @@ tooltips, chat, and more. Screen pixels in, structured readings out.
 > responsible for complying with the game's Terms of Service. See
 > [DISCLAIMER.md](DISCLAIMER.md).
 
-**Status: milestone 1 prototype.** The map name is read end to end: window
-discovery, auto-calibration, dirty detection, OCR, and data-pack snapping.
-See [docs/design.md](docs/design.md).
+**Status: prototype.** Readable today: map name, level, job, character name,
+HP, MP, EXP, NPC dialogue (name, text, options), quest helper (beta), chat
+(beta), plus an opt-in whole-screen text scan. Tooltips, inventory and other
+movable windows are next. See [docs/design.md](docs/design.md) for the
+catalogue and measurements.
 
 ## Build
 
@@ -39,6 +41,19 @@ mapleocr read map_name               # one JSON reading
 
 # Optional: teach it your maps so readings snap to exact names
 mapleocr pack add-map "Victoria Road" "Henesys"
+
+# Teach the status-bar digit sprites (once; again when new digits appear).
+# Type exactly what the ROI shows; the frame is grabbed from the game.
+mapleocr atlas learn --roi hp --text "[356/598]"
+mapleocr atlas learn --roi exp --text "10,105[91.53%]"
+mapleocr atlas learn --roi level --text "17"
+
+# Teach the NPC dialogue window's anchor from a saved frame where it is open
+mapleocr calibrate --learn-anchor npc_dialogue --image fixtures/local/<session>/0010_full.png
+
+# Everything at once, or the whole screen as text lines
+mapleocr watch
+mapleocr watch screen
 
 # 3. Record samples: press F9 in game to save a frame, Ctrl+C to stop
 mapleocr capture-dataset --label "inventory open"
