@@ -155,6 +155,77 @@ pub fn parse_map_name(lines: &[String], pack: Option<&MapPack>) -> Option<Parsed
     Some(Parsed { value: raw, confidence: UNCHECKED_CONFIDENCE, snapped: false })
 }
 
+/// Fold letters OCR confuses with digits in numeric fields.
+fn fold_digit(c: char) -> char {
+    match c {
+        'O' | 'o' | 'D' | 'Q' => '0',
+        'l' | 'I' | '|' | 'i' | '!' => '1',
+        'Z' | 'z' => '2',
+        'S' | 's' => '5',
+        'B' => '8',
+        'g' => '9',
+        c => c,
+    }
+}
+
+/// Runs of digits in `s` (after folding), with the character that follows each run.
+fn numbers(s: &str) -> Vec<(String, Option<char>)> {
+    let folded: Vec<char> = s.chars().map(fold_digit).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < folded.len() {
+        if folded[i].is_ascii_digit() {
+            let start = i;
+            // Allow thousands separators inside a number: 1,234,567
+            while i < folded.len()
+                && (folded[i].is_ascii_digit()
+                    || (folded[i] == ',' && folded.get(i + 1).is_some_and(|c| c.is_ascii_digit())))
+            {
+                i += 1;
+            }
+            let digits: String = folded[start..i].iter().filter(|c| c.is_ascii_digit()).collect();
+            let next = folded[i..].iter().copied().find(|c| !c.is_whitespace());
+            out.push((digits, next));
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// First integer in the text, e.g. a level.
+pub fn parse_int(s: &str) -> Option<i64> {
+    numbers(s).first().and_then(|(d, _)| d.parse().ok())
+}
+
+/// `current/max`, e.g. `HP[544/554]`. Confidence drops if current > max.
+pub fn parse_ratio(s: &str) -> Option<Parsed<(i64, i64)>> {
+    let ns = numbers(s);
+    let idx = ns.iter().position(|(_, next)| *next == Some('/'))?;
+    let cur: i64 = ns[idx].0.parse().ok()?;
+    let max: i64 = ns.get(idx + 1)?.0.parse().ok()?;
+    let plausible = max > 0 && cur <= max;
+    Some(Parsed { value: (cur, max), confidence: if plausible { 0.9 } else { 0.3 }, snapped: false })
+}
+
+/// EXP line: `554 [7.86%]` -> (554, 7.86).
+pub fn parse_exp(s: &str) -> Option<Parsed<(i64, f32)>> {
+    let ns = numbers(s);
+    let value: i64 = ns.first()?.0.parse().ok()?;
+    // Percent: "<int>.<frac>%" -> runs (int, '.'), (frac, '%'), or a bare (int, '%').
+    let pct = ns.iter().enumerate().find_map(|(i, (d, next))| match next {
+        Some('.') => ns.get(i + 1).filter(|(_, n)| *n == Some('%')).and_then(|(f, _)| format!("{d}.{f}").parse().ok()),
+        Some('%') if i > 0 && ns[i - 1].1 != Some('.') => d.parse().ok(),
+        _ => None,
+    });
+    let plausible = pct.is_some_and(|p: f32| (0.0..=100.0).contains(&p));
+    Some(Parsed {
+        value: (value, pct.unwrap_or(f32::NAN)),
+        confidence: if plausible { 0.9 } else { 0.3 },
+        snapped: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +239,19 @@ mod tests {
         assert_eq!(levenshtein("kitten", "sitting"), 3);
         assert_eq!(levenshtein("", "abc"), 3);
         assert!((similarity("henesys", "henesys") - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn numeric_fields() {
+        assert_eq!(parse_int("LV. 15"), Some(15));
+        assert_eq!(parse_ratio("HP[544/554]").unwrap().value, (544, 554));
+        assert_eq!(parse_ratio("HP [ 1,234 / 5O00 ]").unwrap().value, (1234, 5000));
+        assert!(parse_ratio("HP[600/554]").unwrap().confidence < 0.5);
+        assert!(parse_ratio("HP").is_none());
+        let e = parse_exp("EXP. 554 [7.86%]").unwrap();
+        assert_eq!(e.value.0, 554);
+        assert!((e.value.1 - 7.86).abs() < 1e-4);
+        assert!((parse_exp("EXP 12 [45%]").unwrap().value.1 - 45.0).abs() < 1e-4);
     }
 
     #[test]
