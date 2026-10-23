@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use mapleocr_core::{AnchorTemplates, Calibration, Layout, Packs, Pipeline, Reading, Value, data_dir};
+use mapleocr_core::{AnchorTemplates, Calibration, Grid, Layout, Packs, Pipeline, Reading, Value, data_dir};
 use mapleocr_imgproc::{BgraImage, load_png, save_png};
 use mapleocr_layout::calibrate;
 use serde::Deserialize;
@@ -34,7 +34,7 @@ impl EngineArgs {
         let layout = self.layout()?;
         let dir = data_dir()?;
         let only = (!self.rois.is_empty()).then_some(self.rois.as_slice());
-        let pipeline = Pipeline::new(&layout, only, Packs::load(&dir)?)?;
+        let pipeline = Pipeline::new(&layout, only, Packs::load(&dir)?, Some(&dir.join("atlas")))?;
         let templates = AnchorTemplates::load(&dir.join("anchors"))?;
         Ok(Offline { layout, pipeline, templates })
     }
@@ -51,12 +51,14 @@ impl Offline {
         let calib = calibrate(&self.layout, img.view(), self.templates.as_ref());
         let mut out = Vec::new();
         for (i, name) in self.pipeline.roi_names().iter().enumerate() {
-            let crop = img.view().crop(calib.rois[&**name]);
+            let rect = calib.rois[&**name];
+            let crop = img.view().crop(rect);
+            let grid = Grid { origin: (rect.x, rect.y), scale: calib.scale };
             if let Some((dir, stem)) = dump {
                 save_png(&dir.join(format!("{stem}_{name}_roi.png")), crop)?;
                 save_png(&dir.join(format!("{stem}_{name}_ocr.png")), self.pipeline.prepared(i, crop).view())?;
             }
-            out.push(self.pipeline.recognize(i, crop, 0, 0)?);
+            out.push(self.pipeline.recognize(i, crop, grid, 0, 0)?);
         }
         Ok((calib, out))
     }
@@ -67,6 +69,9 @@ pub fn describe(v: &Value) -> String {
         Value::Map(m) if m.region.is_empty() => m.name.clone(),
         Value::Map(m) => format!("{} / {}", m.region, m.name),
         Value::Text { text } => text.replace('\n', " | "),
+        Value::Number { value } => value.to_string(),
+        Value::Ratio { current, max } => format!("{current}/{max}"),
+        Value::Exp { value, percent } => format!("{value} ({percent:.2}%)"),
         Value::Empty => "(empty)".into(),
     }
 }
@@ -119,7 +124,14 @@ pub fn recognize(a: RecognizeArgs) -> Result<()> {
 }
 
 /// `fixtures/local/labels.json`:
-/// `{"schema": "mapleocr.labels/1", "frames": [{"image": "...png", "map_name": {"region": "...", "name": "..."}}]}`
+/// ```json
+/// {"schema": "mapleocr.labels/1", "frames": [
+///   {"image": "session/0001_full.png", "train": false,
+///    "map_name": {"region": "Victoria Road", "name": "Henesys"},
+///    "expect": {"hp": "504/554", "exp": "554 (7.86%)", "job": "Rogue"}}]}
+/// ```
+/// `expect` values compare against the reading's display form. Frames with
+/// `train: true` were used to learn atlases; `--held-out` skips them.
 #[derive(Deserialize)]
 struct Labels {
     schema: String,
@@ -129,7 +141,11 @@ struct Labels {
 #[derive(Deserialize)]
 struct LabeledFrame {
     image: PathBuf,
+    #[serde(default)]
+    train: bool,
     map_name: Option<mapleocr_semantic::MapName>,
+    #[serde(default)]
+    expect: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Args)]
@@ -142,6 +158,17 @@ pub struct FixtureBenchArgs {
     /// Ignore data packs (measure raw recognizer accuracy).
     #[arg(long)]
     no_packs: bool,
+    /// Skip frames marked `train: true` (used to learn atlases).
+    #[arg(long)]
+    held_out: bool,
+}
+
+#[derive(Default)]
+struct RoiStats {
+    n: u32,
+    ok: u32,
+    ms: Vec<f32>,
+    engines: std::collections::BTreeSet<&'static str>,
 }
 
 pub fn bench_fixtures(a: FixtureBenchArgs) -> Result<()> {
@@ -155,52 +182,121 @@ pub fn bench_fixtures(a: FixtureBenchArgs) -> Result<()> {
     let mut eng = a.engine.engine()?;
     if a.no_packs {
         let layout = eng.layout.clone();
-        eng.pipeline = Pipeline::new(&layout, Some(&["map_name".to_string()]), Packs::default())?;
+        let dir = data_dir()?.join("atlas");
+        let only = (!a.engine.rois.is_empty()).then_some(a.engine.rois.as_slice());
+        eng.pipeline = Pipeline::new(&layout, only, Packs::default(), Some(&dir))?;
     }
     eng.pipeline.disable_cache();
-    let (mut n, mut exact, mut region_ok, mut name_ok) = (0, 0, 0, 0);
-    let mut ms = Vec::new();
-    for f in &labels.frames {
-        let Some(want) = &f.map_name else { continue };
+    let mut stats: std::collections::BTreeMap<String, RoiStats> = Default::default();
+    let mut frames = 0;
+    for f in labels.frames.iter().filter(|f| !(a.held_out && f.train)) {
+        let mut expect = f.expect.clone();
+        if let Some(m) = &f.map_name {
+            expect.insert("map_name".into(), describe(&Value::Map(m.clone())));
+        }
+        if expect.is_empty() {
+            continue;
+        }
+        frames += 1;
         let img = load_png(&base.join(&f.image))?;
         let (_, readings) = eng.run(&img, None)?;
-        let Some(r) = readings.iter().find(|r| &*r.roi == "map_name") else { bail!("layout has no map_name ROI") };
-        n += 1;
-        ms.push(r.ms);
-        let (ok_r, ok_n) = match &r.value {
-            Value::Map(m) => (m.region == want.region, m.name == want.name),
-            _ => (false, false),
-        };
-        region_ok += ok_r as u32;
-        name_ok += ok_n as u32;
-        exact += (ok_r && ok_n) as u32;
-        if !(ok_r && ok_n) {
-            println!(
-                "MISS {}: got {:?} (raw {:?}), want {} / {}",
-                f.image.display(),
-                describe(&r.value),
-                r.raw,
-                want.region,
-                want.name
-            );
+        for r in &readings {
+            let Some(want) = expect.get(&*r.roi) else { continue };
+            let got = describe(&r.value);
+            let st = stats.entry(r.roi.to_string()).or_default();
+            st.n += 1;
+            st.ms.push(r.ms);
+            st.engines.insert(r.engine);
+            if &got == want {
+                st.ok += 1;
+            } else {
+                println!("MISS {} {}: got {got:?} (raw {:?}), want {want:?}", f.image.display(), r.roi, r.raw);
+            }
         }
     }
-    if n == 0 {
-        bail!("no labeled map_name frames in {}", a.labels.display());
+    if stats.is_empty() {
+        bail!("no labeled ROIs in {}", a.labels.display());
     }
-    ms.sort_by(f32::total_cmp);
-    let p = |q: f32| ms[((ms.len() - 1) as f32 * q).round() as usize];
-    let pct = |k: u32| 100.0 * k as f32 / n as f32;
     println!(
-        "map_name: {n} frames | exact {:.1}% | region {:.1}% | name {:.1}% | recognize ms p50 {:.1} p95 {:.1} p99 {:.1} max {:.1}{}",
-        pct(exact),
-        pct(region_ok),
-        pct(name_ok),
-        p(0.5),
-        p(0.95),
-        p(0.99),
-        ms[ms.len() - 1],
-        if a.no_packs { " (no packs)" } else { "" }
+        "{frames} frames{}{}",
+        if a.held_out { ", held-out only" } else { "" },
+        if a.no_packs { ", no packs" } else { "" }
     );
+    println!("{:<16} {:>6} {:>9} {:>8} {:>8} {:>8}  engine", "roi", "n", "accuracy", "p50 ms", "p95 ms", "max ms");
+    for (roi, st) in &mut stats {
+        st.ms.sort_by(f32::total_cmp);
+        let p = |q: f32| st.ms[((st.ms.len() - 1) as f32 * q).round() as usize];
+        let engines: Vec<&str> = st.engines.iter().copied().collect();
+        println!(
+            "{roi:<16} {:>6} {:>8.1}% {:>8.2} {:>8.2} {:>8.2}  {}",
+            st.n,
+            100.0 * st.ok as f32 / st.n as f32,
+            p(0.5),
+            p(0.95),
+            st.ms[st.ms.len() - 1],
+            engines.join(",")
+        );
+    }
+    Ok(())
+}
+
+#[derive(clap::Subcommand)]
+pub enum AtlasCmd {
+    /// Teach a `learned:<name>` glyph atlas from one labeled ROI of a saved frame.
+    Learn(LearnArgs),
+    /// Print an atlas's glyphs.
+    Show { name: String },
+}
+
+#[derive(Args)]
+pub struct LearnArgs {
+    /// Full client-area frame (e.g. `*_full.png` from capture-dataset).
+    #[arg(long)]
+    image: PathBuf,
+    /// ROI whose font is `learned:<name>`.
+    #[arg(long)]
+    roi: String,
+    /// Exactly what the ROI shows, e.g. "[544/554]". Spaces are ignored.
+    #[arg(long)]
+    text: String,
+    /// Layout YAML. Default: <data dir>/layout.yaml if present, else built-in.
+    #[arg(long)]
+    layout: Option<PathBuf>,
+}
+
+pub fn atlas(cmd: AtlasCmd) -> Result<()> {
+    let dir = data_dir()?.join("atlas");
+    match cmd {
+        AtlasCmd::Learn(a) => {
+            let eng = EngineArgs { rois: vec![a.roi.clone()], layout: a.layout }.engine()?;
+            let Some(name) = eng.pipeline.learned_font(0).map(str::to_owned) else {
+                bail!("ROI {} does not use a learned:<name> glyph font", a.roi);
+            };
+            let img = load_png(&a.image).with_context(|| format!("loading {}", a.image.display()))?;
+            let calib = calibrate(&eng.layout, img.view(), eng.templates.as_ref());
+            let rect = calib.rois[&a.roi];
+            let native = eng.pipeline.native_ink(
+                0,
+                img.view().crop(rect),
+                Grid { origin: (rect.x, rect.y), scale: calib.scale },
+            );
+            let path = dir.join(format!("{name}.json"));
+            let mut atlas =
+                if path.exists() { mapleocr_core::Atlas::load(&path)? } else { mapleocr_core::Atlas::new(&name, 0) };
+            let added = atlas.learn(&native, &a.text).map_err(|e| anyhow::anyhow!("{}: {e}", a.roi))?;
+            atlas.save(&path)?;
+            let chars: String = atlas.glyphs.iter().map(|g| g.ch).collect();
+            println!("{name}: +{added} glyphs, now {} ({chars}) -> {}", atlas.glyphs.len(), path.display());
+        }
+        AtlasCmd::Show { name } => {
+            let atlas = mapleocr_core::Atlas::load(&dir.join(format!("{name}.json")))?;
+            for g in &atlas.glyphs {
+                println!("'{}' {}x{} drop {}", g.ch, g.bitmap.w, g.bitmap.h, g.drop);
+                for row in g.bitmap.bits.chunks(g.bitmap.w.max(1) as usize) {
+                    println!("  {}", row.iter().map(|&b| if b { '#' } else { '.' }).collect::<String>());
+                }
+            }
+        }
+    }
     Ok(())
 }

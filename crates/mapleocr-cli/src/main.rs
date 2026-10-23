@@ -37,6 +37,9 @@ enum Cmd {
     /// Manage your local data packs.
     #[command(subcommand)]
     Pack(live::PackCmd),
+    /// Learn and inspect glyph atlases (sprite digits etc.) from your captures.
+    #[command(subcommand)]
+    Atlas(offline::AtlasCmd),
     /// Recognize ROIs in saved full-client frames (offline, no game needed).
     Recognize(offline::RecognizeArgs),
     /// Benchmarks.
@@ -159,6 +162,7 @@ fn main() -> Result<()> {
         Cmd::Watch(a) => live::watch(a),
         Cmd::Read(a) => live::read(a),
         Cmd::Pack(c) => live::pack(c),
+        Cmd::Atlas(c) => offline::atlas(c),
         Cmd::Recognize(a) => offline::recognize(a),
         Cmd::Bench(c) => bench::run(c),
     }
