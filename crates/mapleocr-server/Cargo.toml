@@ -1,0 +1,22 @@
+[package]
+name = "mapleocr-server"
+description = "Local HTTP + WebSocket server exposing mpl-ocr readings to any language or web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mapleocr_server"
+
+[dependencies]
+mapleocr-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

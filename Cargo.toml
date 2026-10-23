@@ -15,6 +15,7 @@ mapleocr-layout = { path = "crates/mapleocr-layout" }
 mapleocr-recog = { path = "crates/mapleocr-recog" }
 mapleocr-semantic = { path = "crates/mapleocr-semantic" }
 mapleocr-core = { path = "crates/mapleocr-core" }
+mapleocr-server = { path = "crates/mapleocr-server" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
@@ -29,6 +30,9 @@ windows = "0.62"
 serde_yaml_ng = "0.10"
 arc-swap = "1"
 crossbeam-channel = "0.5"
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal", "time"] }
+futures-util = "0.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [workspace.lints.rust]
