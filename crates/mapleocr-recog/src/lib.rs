@@ -4,6 +4,7 @@
 //! M1 ships the fallback tier ([`WinOcr`], the OCR engine built into
 //! Windows). Glyph, sprite-digit, icon and CRNN tiers arrive in M2-M4.
 
+pub mod glyph;
 pub mod preprocess;
 #[cfg(windows)]
 mod winocr;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+pub use glyph::Atlas;
 pub use mapleocr_semantic::MapName;
 #[cfg(windows)]
 pub use winocr::WinOcr;
@@ -52,6 +54,19 @@ pub enum Value {
         text: String,
     },
     Map(MapName),
+    Number {
+        value: i64,
+    },
+    /// `current/max`, e.g. HP and MP.
+    Ratio {
+        current: i64,
+        max: i64,
+    },
+    /// EXP points and percent of the current level.
+    Exp {
+        value: i64,
+        percent: f32,
+    },
     /// The ROI is visible but holds no text (e.g. a collapsed minimap).
     Empty,
 }
