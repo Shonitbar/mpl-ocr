@@ -5,10 +5,12 @@
 
 mod gray;
 mod io;
+mod native;
 mod search;
 
 pub use gray::Gray;
 pub use io::{ImageError, load_png, save_png};
+pub use native::{to_native, to_native_aligned};
 pub use search::{Match, ncc_search};
 
 /// Axis-aligned rectangle in pixels.
