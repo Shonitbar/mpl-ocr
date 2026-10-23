@@ -1,0 +1,7 @@
+/target
+# User-generated captures, atlases and data packs. Never commit game assets.
+/fixtures/local/
+/samples/
+*.wz
+__pycache__/
+.venv/
