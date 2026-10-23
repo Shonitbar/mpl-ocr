@@ -1,0 +1,25 @@
+[package]
+name = "mapleocr-core"
+description = "mpl-ocr runtime: capture, calibration, dirty detection, recognition, readings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mapleocr-imgproc.workspace = true
+mapleocr-layout.workspace = true
+mapleocr-recog.workspace = true
+mapleocr-semantic.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+thiserror.workspace = true
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mapleocr-capture.workspace = true
+
+[lints]
+workspace = true
