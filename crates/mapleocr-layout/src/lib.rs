@@ -70,6 +70,15 @@ pub struct AnchorSpec {
     /// the default rect grown by 16 native units on each side.
     #[serde(default)]
     pub search: Option<NativeRect>,
+    /// Never template-matched (e.g. the whole client area).
+    #[serde(default)]
+    pub fixed: bool,
+    /// A window that is only sometimes open (NPC dialogue). Its ROIs are read
+    /// only while the anchor template is present; otherwise they report
+    /// `Hidden`. The template is learned from a saved frame
+    /// (`mapleocr calibrate --learn-anchor`), never bootstrapped.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -94,6 +103,13 @@ pub struct RoiSpec {
     /// Recognize only after the ROI's pixels are unchanged for this many frames.
     #[serde(default)]
     pub settle_frames: u32,
+    /// Recognize at most this often (ms). For ROIs over translucent panels,
+    /// whose pixels change every frame even when the text does not.
+    #[serde(default)]
+    pub min_interval_ms: u32,
+    /// Expensive ROIs (whole-screen scans) run only when asked for by name.
+    #[serde(default)]
+    pub opt_in: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,8 +189,9 @@ impl AnchorTemplates {
         let client = (frame.width, frame.height);
         let images = layout
             .anchors
-            .keys()
-            .filter_map(|name| {
+            .iter()
+            .filter(|(_, spec)| !spec.fixed && !spec.optional)
+            .filter_map(|(name, _)| {
                 let r = layout.default_anchor_rect(name, client)?;
                 Some((name.clone(), Gray::from_bgra(frame.crop(r))))
             })
@@ -199,6 +216,27 @@ impl AnchorTemplates {
         };
         std::fs::write(dir.join("anchors.json"), serde_json::to_string_pretty(&meta)?)?;
         Ok(())
+    }
+
+    /// Cut one anchor's template from a frame where its window is open at
+    /// the declared default position, and add it to the saved set.
+    pub fn learn_anchor(dir: &Path, layout: &Layout, name: &str, frame: BgraView<'_>) -> Result<Self> {
+        let client = (frame.width, frame.height);
+        let r = layout
+            .default_anchor_rect(name, client)
+            .ok_or_else(|| LayoutError::Invalid(format!("unknown anchor {name:?}")))?;
+        let mut t =
+            Self::load(dir)?.unwrap_or_else(|| Self { scale: layout.scale_for(client), images: BTreeMap::new() });
+        let k = t.scale / layout.scale_for(client);
+        let g = Gray::from_bgra(frame.crop(r));
+        let g = if (k - 1.0).abs() < 1e-3 {
+            g
+        } else {
+            g.resize((g.width as f32 * k).round() as u32, (g.height as f32 * k).round() as u32)
+        };
+        t.images.insert(name.to_owned(), g);
+        t.save(dir)?;
+        Ok(t)
     }
 
     /// `Ok(None)` if no templates were saved yet.
@@ -234,6 +272,41 @@ pub struct AnchorFix {
     pub score: Option<f32>,
 }
 
+/// Check that an optional window is open before reading its ROIs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Presence {
+    /// Anchor template at the current scale; `None` until the user learns it.
+    pub template: Option<Gray>,
+    /// Anchor top-left within the ROI's capture rect.
+    pub offset: (i32, i32),
+}
+
+/// Minimum NCC for an optional window's anchor to count as open.
+pub const PRESENCE_THRESHOLD: f32 = 0.7;
+
+impl Presence {
+    /// Is the window open in this capture? `None` if the anchor template has
+    /// not been learned. Only looks at the anchor's few pixels (±3 px), so it
+    /// is cheap enough to run on every frame.
+    pub fn is_open(&self, capture: BgraView<'_>) -> Option<bool> {
+        let t = self.template.as_ref()?;
+        // Fast path: the window is where it always opens.
+        let exact = Rect::new(self.offset.0, self.offset.1, t.width, t.height);
+        if exact.clamp_to(capture.width, capture.height) == exact {
+            let g = Gray::from_bgra(capture.crop(exact));
+            if ncc_search(&g, t, Rect::new(0, 0, 0, 0)).is_some_and(|hit| hit.score >= PRESENCE_THRESHOLD) {
+                return Some(true);
+            }
+        }
+        let m = 3;
+        let r = Rect::new(self.offset.0 - m, self.offset.1 - m, t.width + 2 * m as u32, t.height + 2 * m as u32)
+            .clamp_to(capture.width, capture.height);
+        let g = Gray::from_bgra(capture.crop(r));
+        let area = Rect::new(0, 0, g.width, g.height);
+        Some(ncc_search(&g, t, area).is_some_and(|hit| hit.score >= PRESENCE_THRESHOLD))
+    }
+}
+
 /// A layout resolved for one client size.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Calibration {
@@ -242,6 +315,11 @@ pub struct Calibration {
     pub anchors: BTreeMap<String, AnchorFix>,
     /// ROI rectangles in client pixels, clamped to the client area.
     pub rois: BTreeMap<String, Rect>,
+    /// What to capture per ROI: the ROI itself, or for ROIs of optional
+    /// windows the union with the anchor so presence can be checked.
+    pub capture: BTreeMap<String, Rect>,
+    #[serde(skip)]
+    pub presence: BTreeMap<String, Presence>,
 }
 
 impl Calibration {
@@ -260,6 +338,12 @@ pub fn calibrate(layout: &Layout, frame: BgraView<'_>, templates: Option<&Anchor
     for (name, spec) in &layout.anchors {
         let default = layout.to_client(spec.origin, spec.rect, client);
         let mut fix = AnchorFix { rect: default, source: FixSource::Default, score: None };
+        // Optional windows are usually closed at calibration time; their
+        // presence is checked per frame instead (see `Presence`).
+        if spec.optional {
+            anchors.insert(name.clone(), fix);
+            continue;
+        }
         if let (Some(t), Some(gray)) = (templates.and_then(|t| t.images.get(name).map(|g| (t, g))), &gray) {
             let (ts, tmpl) = t;
             let k = scale / ts.scale;
@@ -301,8 +385,31 @@ pub fn calibrate(layout: &Layout, frame: BgraView<'_>, templates: Option<&Anchor
             );
             (name.clone(), r.clamp_to(client.0, client.1))
         })
-        .collect();
-    Calibration { client_size: client, scale, anchors, rois }
+        .collect::<BTreeMap<_, _>>();
+    let mut capture = BTreeMap::new();
+    let mut presence = BTreeMap::new();
+    for (name, roi) in &layout.rois {
+        let r = rois[name];
+        if !layout.anchors[&roi.anchor].optional {
+            capture.insert(name.clone(), r);
+            continue;
+        }
+        let a = anchors[&roi.anchor].rect;
+        let (x0, y0) = (r.x.min(a.x), r.y.min(a.y));
+        let (x1, y1) = (r.right().max(a.right()), r.bottom().max(a.bottom()));
+        let cap = Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32).clamp_to(client.0, client.1);
+        capture.insert(name.clone(), cap);
+        let template = templates.and_then(|t| t.images.get(&roi.anchor).map(|g| (t.scale, g))).map(|(ts, g)| {
+            let k = scale / ts;
+            if (k - 1.0).abs() < 1e-3 {
+                g.clone()
+            } else {
+                g.resize((g.width as f32 * k).round() as u32, (g.height as f32 * k).round() as u32)
+            }
+        });
+        presence.insert(name.clone(), Presence { template, offset: (a.x - cap.x, a.y - cap.y) });
+    }
+    Calibration { client_size: client, scale, anchors, rois, capture, presence }
 }
 
 #[cfg(test)]
@@ -359,5 +466,20 @@ mod tests {
         let c = calibrate(&layout, moved.view(), None);
         assert_eq!(c.anchors["cap"].source, FixSource::Default);
         assert_eq!(c.rois["r"], Rect::new(20, 44, 60, 10));
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+
+    #[test]
+    fn whole_screen_scan_is_opt_in() {
+        // Capturing the full client every frame costs ~10% of a core; it must
+        // never run unless asked for by name.
+        let l = Layout::builtin();
+        let full: Vec<_> = l.rois.iter().filter(|(_, r)| r.rect[2] * r.rect[3] > 200_000.0).collect();
+        assert!(!full.is_empty());
+        assert!(full.iter().all(|(_, r)| r.opt_in), "full-screen ROIs must be opt_in: {full:?}");
     }
 }
