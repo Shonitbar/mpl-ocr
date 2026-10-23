@@ -22,28 +22,17 @@ pub use capture::{BackendKind, Capture};
 pub use d3d::RoiStager;
 pub use dxgi::DxgiBackend;
 pub use target::{
-    CaptureTarget, MonitorInfo, TargetSelector, WindowGeometry, WindowInfo, init_dpi_awareness, list_monitors,
-    list_windows,
+    CaptureTarget, MonitorInfo, TargetSelector, WindowGeometry, WindowInfo, init_dpi_awareness,
+    init_thread_dpi_awareness, list_monitors, list_windows,
 };
 pub use time::{Ticks, now_ticks};
 pub use wgc::WgcBackend;
 
 use std::time::Duration;
 
-/// Axis-aligned rectangle in client-area pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-    pub h: u32,
-}
-
-impl Rect {
-    pub const fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
-        Self { x, y, w, h }
-    }
-}
+use mapleocr_imgproc::BgraView;
+/// Rectangles handed to capture are in client-area pixels.
+pub use mapleocr_imgproc::Rect;
 
 /// CPU copy of one ROI, tightly packed BGRA8 (`width * 4` bytes per row).
 ///
@@ -74,6 +63,10 @@ impl RoiImage {
     /// BGRA8 pixels, row-major, stride `width * 4`.
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn view(&self) -> BgraView<'_> {
+        BgraView::packed(self.rect.w, self.rect.h, &self.data)
     }
 
     pub(crate) fn data_mut(&mut self) -> &mut [u8] {

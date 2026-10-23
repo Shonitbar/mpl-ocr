@@ -53,7 +53,10 @@ fn open_backend(target: &CaptureTarget, kind: BackendKind) -> Result<Box<dyn Cap
 }
 
 impl Capture {
+    /// Opens capture and makes the calling thread per-monitor DPI aware;
+    /// use the returned `Capture` from this thread.
     pub fn open(selector: TargetSelector, kind: BackendKind) -> Result<Self> {
+        crate::target::init_thread_dpi_awareness();
         let target = selector.resolve()?;
         let backend = open_backend(&target, kind)?;
         Ok(Self {

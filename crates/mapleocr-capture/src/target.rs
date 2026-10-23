@@ -14,6 +14,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetClientRect, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
@@ -28,6 +29,14 @@ use crate::{CaptureError, Result};
 pub fn init_dpi_awareness() {
     // SAFETY: plain Win32 call. It fails harmlessly if awareness was already set.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// Make the calling thread per-monitor DPI aware, so window geometry is in
+/// physical pixels (matching captured frames) without touching the rest of
+/// the host process. [`crate::Capture::open`] calls this for its thread.
+pub fn init_thread_dpi_awareness() {
+    // SAFETY: plain Win32 call affecting only the calling thread.
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,10 +148,17 @@ impl TargetSelector {
         }
         let windows = list_windows();
         let best = if self.is_empty() {
+            // A "maple" process beats a "maple" title: browser tabs about the
+            // game have it in their title too.
             windows
                 .into_iter()
-                .filter(|w| w.title.to_lowercase().contains("maple") || w.process.to_lowercase().contains("maple"))
-                .max_by_key(|w| w.client_size.0 as u64 * w.client_size.1 as u64)
+                .filter_map(|w| {
+                    let by_process = w.process.to_lowercase().contains("maple");
+                    let by_title = w.title.to_lowercase().contains("maple");
+                    (by_process || by_title).then(|| ((by_process, w.client_size.0 as u64 * w.client_size.1 as u64), w))
+                })
+                .max_by_key(|(rank, _)| *rank)
+                .map(|(_, w)| w)
         } else {
             windows
                 .into_iter()

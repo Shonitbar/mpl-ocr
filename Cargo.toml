@@ -10,9 +10,14 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 mapleocr-capture = { path = "crates/mapleocr-capture" }
+mapleocr-imgproc = { path = "crates/mapleocr-imgproc" }
+mapleocr-layout = { path = "crates/mapleocr-layout" }
+mapleocr-recog = { path = "crates/mapleocr-recog" }
+mapleocr-semantic = { path = "crates/mapleocr-semantic" }
+mapleocr-core = { path = "crates/mapleocr-core" }
 anyhow = "1"
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 toml = "1"
 clap = { version = "4", features = ["derive"] }
@@ -21,6 +26,10 @@ ctrlc = "3"
 dirs = "7"
 criterion = "0.8"
 windows = "0.62"
+serde_yaml_ng = "0.10"
+arc-swap = "1"
+crossbeam-channel = "0.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

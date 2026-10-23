@@ -89,6 +89,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "380962b3d93b99642e50b9febf72c071e97e8b32d86eae9cf4ef582bb960ae6e"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -258,6 +267,15 @@ checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
  "itertools",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -482,6 +500,7 @@ name = "mapleocr-capture"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "mapleocr-imgproc",
  "serde",
  "thiserror",
  "windows",
@@ -494,13 +513,74 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "dirs",
  "mapleocr-capture",
+ "mapleocr-core",
+ "mapleocr-imgproc",
+ "mapleocr-layout",
+ "mapleocr-semantic",
  "png",
  "serde",
  "serde_json",
  "toml",
  "windows",
+]
+
+[[package]]
+name = "mapleocr-core"
+version = "0.0.1"
+dependencies = [
+ "arc-swap",
+ "crossbeam-channel",
+ "dirs",
+ "mapleocr-capture",
+ "mapleocr-imgproc",
+ "mapleocr-layout",
+ "mapleocr-recog",
+ "mapleocr-semantic",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "mapleocr-imgproc"
+version = "0.0.1"
+dependencies = [
+ "png",
+ "serde",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "mapleocr-layout"
+version = "0.0.1"
+dependencies = [
+ "mapleocr-imgproc",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+]
+
+[[package]]
+name = "mapleocr-recog"
+version = "0.0.1"
+dependencies = [
+ "mapleocr-imgproc",
+ "mapleocr-semantic",
+ "serde",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
+name = "mapleocr-semantic"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -730,6 +810,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -788,6 +874,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -910,6 +1009,12 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "utf8parse"
@@ -1137,6 +1242,12 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "zerocopy"
