@@ -22,6 +22,8 @@ use crate::{NamedRoi, TargetArgs};
 pub enum BenchCmd {
     /// Capture latency and CPU use against the live target.
     Capture(CaptureBenchArgs),
+    /// Recognition accuracy and latency on labeled saved frames.
+    Fixtures(crate::offline::FixtureBenchArgs),
 }
 
 #[derive(Args)]
@@ -48,10 +50,11 @@ pub struct CaptureBenchArgs {
 pub fn run(cmd: BenchCmd) -> Result<()> {
     match cmd {
         BenchCmd::Capture(a) => capture(a),
+        BenchCmd::Fixtures(a) => crate::offline::bench_fixtures(a),
     }
 }
 
-fn cpu_time() -> Duration {
+pub(crate) fn cpu_time() -> Duration {
     let (mut c, mut e, mut k, mut u) = Default::default();
     // SAFETY: valid out-pointers for the current-process pseudo handle.
     unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) }.expect("GetProcessTimes");

@@ -4,6 +4,8 @@ mod bench;
 mod config;
 mod dataset;
 mod hotkey;
+mod live;
+mod offline;
 mod pngout;
 mod targets;
 
@@ -26,6 +28,17 @@ enum Cmd {
     Select(targets::SelectArgs),
     /// Save full frames and named ROI crops as PNG + JSON sidecars.
     CaptureDataset(dataset::DatasetArgs),
+    /// Locate UI anchors and ROIs on the live screen (cuts anchor templates on first run).
+    Calibrate(live::CalibrateArgs),
+    /// Print readings live as they change.
+    Watch(live::WatchArgs),
+    /// Print one reading as JSON and exit.
+    Read(live::ReadArgs),
+    /// Manage your local data packs.
+    #[command(subcommand)]
+    Pack(live::PackCmd),
+    /// Recognize ROIs in saved full-client frames (offline, no game needed).
+    Recognize(offline::RecognizeArgs),
     /// Benchmarks.
     #[command(subcommand)]
     Bench(bench::BenchCmd),
@@ -142,6 +155,11 @@ fn main() -> Result<()> {
         Cmd::Targets(a) => targets::run_targets(a),
         Cmd::Select(a) => targets::run_select(a),
         Cmd::CaptureDataset(a) => dataset::run(a),
+        Cmd::Calibrate(a) => live::calibrate_cmd(a),
+        Cmd::Watch(a) => live::watch(a),
+        Cmd::Read(a) => live::read(a),
+        Cmd::Pack(c) => live::pack(c),
+        Cmd::Recognize(a) => offline::recognize(a),
         Cmd::Bench(c) => bench::run(c),
     }
 }
