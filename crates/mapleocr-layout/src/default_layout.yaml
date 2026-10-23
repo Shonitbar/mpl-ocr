@@ -1,0 +1,27 @@
+# Default layout for MapleStory Classic World.
+#
+# Coordinates are native UI units: the client draws its UI on a canvas
+# `canvas_height` lines tall and stretches it to the window, so
+# scale = client height / canvas_height (measured: 1200 / 768 = 1.5625).
+#
+# Anchors are UI landmarks found by template matching at calibration time.
+# Their templates are cut from the user's own screen on first run; none ship.
+# ROI rects are relative to their anchor's top-left.
+schema: mapleocr.layout/1
+canvas_height: 768
+
+anchors:
+  minimap_caption:          # "MINI MAP" caption in the minimap title bar
+    origin: top_left
+    rect: [6, 7, 46, 11]
+    search: [0, 0, 420, 260]
+
+rois:
+  map_name:                 # two lines: region ("Victoria Road") and map ("Henesys Market")
+    anchor: minimap_caption
+    rect: [42, 20, 400, 32]
+    recognizer: ocr
+    key: white              # white text with a drop shadow
+    crop: panel             # minimap width varies; stop at the panel's right edge
+    parse: map_name
+    settle_frames: 2        # map changes fade; wait until pixels are stable

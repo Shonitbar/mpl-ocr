@@ -1,0 +1,17 @@
+[package]
+name = "mapleocr-layout"
+description = "Declarative ROI registry and anchor-based auto-calibration for mpl-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mapleocr-imgproc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
