@@ -4,7 +4,7 @@
 //! general-purpose fallback until the ONNX tiers land; it never runs on the
 //! capture thread.
 
-use mapleocr_imgproc::BgraView;
+use mapleocr_imgproc::{BgraView, Rect};
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
@@ -62,7 +62,20 @@ impl Recognizer for WinOcr {
             img.height as i32,
         )?;
         let result = self.engine.RecognizeAsync(&bitmap)?.join()?;
-        let lines = result.Lines()?.into_iter().map(|l| l.Text().map(|t| t.to_string())).collect::<Result<_, _>>()?;
-        Ok(Recognition { lines, confidence: None })
+        let (mut lines, mut boxes) = (Vec::new(), Vec::new());
+        for line in result.Lines()? {
+            lines.push(line.Text()?.to_string());
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for w in line.Words()? {
+                let r = w.BoundingRect()?;
+                (x0, y0, x1, y1) = (x0.min(r.X), y0.min(r.Y), x1.max(r.X + r.Width), y1.max(r.Y + r.Height));
+            }
+            boxes.push(if x0 <= x1 {
+                Rect::new(x0 as i32, y0 as i32, (x1 - x0).ceil() as u32, (y1 - y0).ceil() as u32)
+            } else {
+                Rect::default()
+            });
+        }
+        Ok(Recognition { lines, boxes, confidence: None })
     }
 }

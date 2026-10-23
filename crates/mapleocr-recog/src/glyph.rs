@@ -16,8 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::Recognition;
 
-/// Minimum IoU to accept a glyph.
-const ACCEPT: f32 = 0.7;
+/// Minimum IoU to accept a glyph from a GDI-rendered font (rasterization
+/// differs slightly from the game's). Learned sprite atlases are cut from the
+/// game itself and match near-exactly, so they demand more: an unlearned "8"
+/// must not pass as a "5".
+const ACCEPT_GDI: f32 = 0.7;
+const ACCEPT_LEARNED: f32 = 0.85;
 /// Ink threshold as a fraction from background to ink level. Measured: 0.4
 /// merges neighbouring status digits; 0.5 keeps them apart and still keeps
 /// 1-px sprites like the "." in "7.86%".
@@ -64,6 +68,49 @@ impl Bitmap {
         Bitmap { w, h, bits }
     }
 
+    /// Clear rows that are dashed rules (equal-length runs at an equal
+    /// pitch, e.g. the underline of a selected dialogue option), so they do
+    /// not merge into the text line above.
+    pub fn erase_dashed_rules(&mut self) {
+        for y in 0..self.h {
+            let row = &self.bits[(y * self.w) as usize..((y + 1) * self.w) as usize];
+            let mut runs = Vec::new();
+            let mut x = 0usize;
+            while x < row.len() {
+                if row[x] {
+                    let s = x;
+                    while x < row.len() && row[x] {
+                        x += 1;
+                    }
+                    runs.push((s, x - s));
+                } else {
+                    x += 1;
+                }
+            }
+            if runs.len() < 6 {
+                continue;
+            }
+            let len = runs[0].1;
+            let pitch = runs[1].0 - runs[0].0;
+            let regular = runs.iter().all(|r| r.1.abs_diff(len) <= 1)
+                && runs.windows(2).all(|w| (w[1].0 - w[0].0).abs_diff(pitch) <= 1);
+            // A rule is one pixel tall: little ink directly above or below it.
+            // (Monospaced sprite digits also have regular runs, but stacked.)
+            let (mut on, mut touching) = (0, 0);
+            for &(x0, n) in &runs {
+                for x in x0..x0 + n {
+                    on += 1;
+                    let above = y > 0 && self.bits[((y - 1) * self.w) as usize + x];
+                    let below = y + 1 < self.h && self.bits[((y + 1) * self.w) as usize + x];
+                    touching += usize::from(above || below);
+                }
+            }
+            if regular && touching * 5 <= on {
+                self.bits[(y * self.w) as usize..((y + 1) * self.w) as usize].fill(false);
+            }
+        }
+    }
+
     /// Tight bounding box of ink within columns `x0..x1` and rows `y0..y1`.
     fn ink_bbox(&self, x0: u32, x1: u32, y0: u32, y1: u32) -> Option<(u32, u32, u32, u32)> {
         let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0, 0);
@@ -81,6 +128,8 @@ impl Bitmap {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Glyph {
     pub ch: char,
+    /// Second character for pair glyphs: letters GDI draws touching ("ft", "tt").
+    pub ch2: Option<char>,
     pub bitmap: Bitmap,
     /// Bottom ink row relative to the baseline row (0 sits on it, >0 descends).
     pub drop: i32,
@@ -93,6 +142,8 @@ pub struct Atlas {
     /// A gap of at least this many native pixels between glyphs is a space (0: never).
     pub space: u32,
     pub glyphs: Vec<Glyph>,
+    /// Minimum IoU to accept a glyph.
+    pub accept: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,6 +157,8 @@ struct AtlasFile {
 #[derive(Serialize, Deserialize)]
 struct GlyphFile {
     ch: char,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ch2: Option<char>,
     drop: i32,
     /// Rows of `#` (ink) and `.`.
     rows: Vec<String>,
@@ -115,7 +168,7 @@ pub const ATLAS_SCHEMA: &str = "mapleocr.atlas/1";
 
 impl Atlas {
     pub fn new(name: &str, space: u32) -> Self {
-        Self { name: name.into(), space, glyphs: Vec::new() }
+        Self { name: name.into(), space, glyphs: Vec::new(), accept: ACCEPT_LEARNED }
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
@@ -131,10 +184,10 @@ impl Atlas {
                 let h = g.rows.len() as u32;
                 let w = g.rows.first().map_or(0, |r| r.chars().count() as u32);
                 let bits = g.rows.iter().flat_map(|r| r.chars().map(|c| c == '#')).collect();
-                Glyph { ch: g.ch, drop: g.drop, bitmap: Bitmap { w, h, bits } }
+                Glyph { ch: g.ch, ch2: g.ch2, drop: g.drop, bitmap: Bitmap { w, h, bits } }
             })
             .collect();
-        Ok(Self { name: f.name, space: f.space, glyphs })
+        Ok(Self { name: f.name, space: f.space, glyphs, accept: ACCEPT_LEARNED })
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -147,6 +200,7 @@ impl Atlas {
                 .iter()
                 .map(|g| GlyphFile {
                     ch: g.ch,
+                    ch2: g.ch2,
                     drop: g.drop,
                     rows: g
                         .bitmap
@@ -163,13 +217,23 @@ impl Atlas {
         std::fs::write(path, serde_json::to_string_pretty(&f).map_err(std::io::Error::other)?)
     }
 
+    /// Union of several atlases (e.g. a font's regular and bold faces).
+    pub fn merged(name: &str, parts: &[&Atlas]) -> Atlas {
+        let space = parts.iter().map(|a| a.space).filter(|&s| s > 0).min().unwrap_or(0);
+        let glyphs = parts.iter().flat_map(|a| a.glyphs.iter().cloned()).collect();
+        let accept = parts.iter().map(|a| a.accept).fold(1.0f32, f32::min);
+        Atlas { name: name.into(), space, glyphs, accept }
+    }
+
+    /// Widest single-character glyph; wider segments are split.
     fn max_w(&self) -> u32 {
-        self.glyphs.iter().map(|g| g.bitmap.w).max().unwrap_or(0)
+        self.glyphs.iter().filter(|g| g.ch2.is_none()).map(|g| g.bitmap.w).max().unwrap_or(0)
     }
 
     /// Learn glyphs from one labeled line (`text` without its spaces must have
-    /// one character per segment). Existing characters are kept. Returns the
-    /// number of new glyphs, or an error describing the mismatch.
+    /// one character per segment). A character already known is added again
+    /// only as a distinct variant. Returns the number of glyphs added, or an
+    /// error describing the mismatch.
     pub fn learn(&mut self, native: &Gray, text: &str) -> Result<usize, String> {
         let bm = Bitmap::binarize(native);
         let line = lines(&bm).into_iter().max_by_key(|&(a, b)| b - a).ok_or("no ink found")?;
@@ -189,13 +253,38 @@ impl Atlas {
             ));
         }
         let baseline = baseline(&segs);
+        // Guard against labels shifted by a glyph that split or merged:
+        // a segment that already matches a different character exactly.
+        for (s, &ch) in segs.iter().zip(&chars) {
+            let bitmap = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
+            if let Some(other) = self
+                .glyphs
+                .iter()
+                .filter(|g| g.ch2.is_none() && g.ch != ch)
+                .find(|g| iou_shifted(&g.bitmap, &bitmap) >= 0.95)
+            {
+                return Err(format!(
+                    "segment labeled {ch:?} looks exactly like known {:?}: labels are probably shifted (a glyph split or merged); try another frame",
+                    other.ch
+                ));
+            }
+        }
         let mut added = 0;
         for (s, ch) in segs.iter().zip(chars) {
-            if self.glyphs.iter().any(|g| g.ch == ch) {
+            let bitmap = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
+            // Keep a variant per distinct rendering (sub-pixel phase differs
+            // between screen positions); skip near-duplicates.
+            let known: Vec<&Glyph> = self.glyphs.iter().filter(|g| g.ch == ch && g.ch2.is_none()).collect();
+            if known.iter().map(|g| iou_shifted(&g.bitmap, &bitmap)).fold(0.0f32, f32::max) >= 0.95 {
                 continue;
             }
-            let bitmap = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
-            self.glyphs.push(Glyph { ch, bitmap, drop: s.y1 as i32 - 1 - baseline });
+            // A variant of a known character has about the same size.
+            if !known.is_empty()
+                && !known.iter().any(|g| g.bitmap.w.abs_diff(bitmap.w) <= 1 && g.bitmap.h.abs_diff(bitmap.h) <= 1)
+            {
+                continue;
+            }
+            self.glyphs.push(Glyph { ch, ch2: None, bitmap, drop: s.y1 as i32 - 1 - baseline });
             added += 1;
         }
         Ok(added)
@@ -203,17 +292,31 @@ impl Atlas {
 
     /// Read every text line in a native-grid ink image.
     pub fn read(&self, native: &Gray) -> Recognition {
-        let bm = Bitmap::binarize(native);
-        let mut out = Vec::new();
+        self.read_bitmap(Bitmap::binarize(native))
+    }
+
+    /// Read an already binarized native-grid image (lets callers cache by bitmap).
+    pub fn read_bitmap(&self, mut bm: Bitmap) -> Recognition {
+        bm.erase_dashed_rules();
+        let (mut out, mut boxes) = (Vec::new(), Vec::new());
         let mut worst = 1.0f32;
         for line in lines(&bm) {
             let (text, conf) = self.read_line(&bm, line);
-            if !text.trim().is_empty() {
+            // Mostly-unknown lines are icons, borders or world pixels, not text.
+            // Lines of mostly punctuation are underlines and specks.
+            let shown = text.chars().filter(|c| !c.is_whitespace()).count();
+            let unknown = text.chars().filter(|&c| c == '?').count();
+            let alnum = text.chars().filter(|c| c.is_alphanumeric()).count();
+            if shown > 0 && unknown * 2 <= shown && alnum * 2 >= shown {
                 worst = worst.min(conf);
                 out.push(text);
+                let segs = segments(&bm, line);
+                let (x0, x1) = (segs.first().map_or(0, |s| s.x0), segs.last().map_or(0, |s| s.x1));
+                boxes.push(mapleocr_imgproc::Rect::new(x0 as i32, line.0 as i32, x1 - x0, line.1 - line.0));
             }
         }
-        Recognition { confidence: Some(if out.is_empty() { 1.0 } else { worst }), lines: out }
+        // Boxes are in native-grid pixels of the input.
+        Recognition { confidence: Some(if out.is_empty() { 1.0 } else { worst }), lines: out, boxes }
     }
 
     fn read_line(&self, bm: &Bitmap, line: (u32, u32)) -> (String, f32) {
@@ -222,23 +325,49 @@ impl Atlas {
         let mut text = String::new();
         let mut sims = Vec::new();
         let mut prev_x1: Option<u32> = None;
-        for s in &segs {
-            if let Some(px) = prev_x1
-                && self.space > 0
-                && s.x0 - px >= self.space
+        let mut i = 0;
+        while i < segs.len() {
+            let mut s = segs[i];
+            i += 1;
+            let gap = prev_x1.map(|px| s.x0 - px);
+            let (mut best, mut sim) = self.best(&bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0), s.y1 as i32 - 1 - base);
+            // A glyph with an empty column inside (the game's bold "n" has a
+            // notch) arrives as two segments: try them merged.
+            // Bold "m"/"h" split the same way and their halves can look like
+            // "n"+"r": take the merge whenever it fits better than both halves.
+            if let Some(next) = segs.get(i)
+                && next.x0 - s.x1 <= 1
             {
-                text.push(' ');
+                let m = Segment { x0: s.x0, x1: next.x1, y0: s.y0.min(next.y0), y1: s.y1.max(next.y1) };
+                let (mb, ms) = self.best(&bm.crop(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0), m.y1 as i32 - 1 - base);
+                let next_sim = self
+                    .best(&bm.crop(next.x0, next.y0, next.x1 - next.x0, next.y1 - next.y0), next.y1 as i32 - 1 - base)
+                    .1;
+                if ms >= self.accept && (sim < self.accept || ms > sim.max(next_sim)) {
+                    (s, best, sim) = (m, mb, ms);
+                    i += 1;
+                }
+            }
+            if let Some(gap) = gap
+                && self.space > 0
+            {
+                // Digits like "1" have wide side bearings: need a bigger gap.
+                let digits =
+                    text.ends_with(|c: char| c.is_ascii_digit()) && best.is_some_and(|g| g.ch.is_ascii_digit());
+                if gap >= self.space + if digits { 2 } else { 0 } {
+                    text.push(' ');
+                }
             }
             prev_x1 = Some(s.x1);
-            let drop = s.y1 as i32 - 1 - base;
-            let seg = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
-            let (best, sim) = self.best(&seg, drop);
-            if sim >= ACCEPT || s.x1 - s.x0 <= self.max_w() {
-                text.push(if sim >= ACCEPT { best } else { '?' });
+            let wide = s.x1 - s.x0 > self.max_w();
+            // Blobs much wider than a few letters are not text (world pixels, rules).
+            let too_wide = s.x1 - s.x0 > 4 * self.max_w();
+            if sim >= self.accept || !wide || too_wide {
+                push_glyph(&mut text, best.filter(|_| sim >= self.accept));
                 sims.push(sim);
             } else {
-                for (ch, sim) in self.split(bm, s, base) {
-                    text.push(ch);
+                for (g, sim) in self.split(bm, &s, base) {
+                    push_glyph(&mut text, g);
                     sims.push(sim);
                 }
             }
@@ -248,8 +377,8 @@ impl Atlas {
     }
 
     /// Best glyph for a tight segment bitmap.
-    fn best(&self, seg: &Bitmap, drop: i32) -> (char, f32) {
-        let mut best = ('?', 0.0f32);
+    fn best(&self, seg: &Bitmap, drop: i32) -> (Option<&Glyph>, f32) {
+        let mut best = (None, 0.0f32);
         for g in &self.glyphs {
             let gb = &g.bitmap;
             if gb.w.abs_diff(seg.w) > 1 || gb.h.abs_diff(seg.h) > 1 {
@@ -260,52 +389,78 @@ impl Atlas {
                 sim -= 0.25;
             }
             if sim > best.1 {
-                best = (g.ch, sim);
+                best = (Some(g), sim);
             }
         }
         best
     }
 
-    /// Greedy left-to-right split of a segment wider than any glyph.
-    fn split(&self, bm: &Bitmap, s: &Segment, base: i32) -> Vec<(char, f32)> {
-        let mut out = Vec::new();
-        let mut x = s.x0;
-        while x < s.x1 {
-            let mut best: Option<(char, f32, u32)> = None;
-            for g in &self.glyphs {
-                let gw = g.bitmap.w;
-                if gw == 0 || x + gw > s.x1 + 1 {
+    /// Split a segment wider than any glyph (letters the game draws
+    /// touching) into the glyph sequence that best explains it: dynamic
+    /// programming over column positions, maximizing width-weighted IoU.
+    fn split(&self, bm: &Bitmap, s: &Segment, base: i32) -> Vec<(Option<&Glyph>, f32)> {
+        let w = (s.x1 - s.x0) as usize;
+        // best[x] = (score, previous x, glyph index or usize::MAX for a skipped empty column)
+        let mut best: Vec<Option<(f32, usize, usize)>> = vec![None; w + 1];
+        best[0] = Some((0.0, 0, usize::MAX));
+        let column_empty = |x: usize| !(s.y0..s.y1).any(|y| bm.at((s.x0 as usize + x) as i32, y as i32));
+        for x in 0..w {
+            let Some((score, _, _)) = best[x] else { continue };
+            if column_empty(x) && best[x + 1].is_none_or(|(b, _, _)| score > b) {
+                best[x + 1] = Some((score, x, usize::MAX));
+            }
+            for (gi, g) in self.glyphs.iter().enumerate() {
+                let gw = g.bitmap.w as usize;
+                if gw == 0 || x + gw > w {
                     continue;
                 }
                 let bottom = base + g.drop;
                 let top = bottom + 1 - g.bitmap.h as i32;
-                let mut cand = Bitmap { w: gw, h: g.bitmap.h, bits: Vec::with_capacity((gw * g.bitmap.h) as usize) };
-                for y in top..=bottom {
-                    for dx in 0..gw {
-                        cand.bits.push(bm.at((x + dx) as i32, y));
+                let mut sim = 0.0f32;
+                for dy in -1..=1 {
+                    let mut cand =
+                        Bitmap { w: gw as u32, h: g.bitmap.h, bits: Vec::with_capacity(gw * g.bitmap.h as usize) };
+                    for y in top + dy..=bottom + dy {
+                        for dx in 0..gw {
+                            cand.bits.push(bm.at((s.x0 as usize + x + dx) as i32, y));
+                        }
                     }
+                    sim = sim.max(iou(&g.bitmap, &cand, 0, 0) - if dy == 0 { 0.0 } else { 0.02 });
                 }
-                let sim = iou(&g.bitmap, &cand, 0, 0);
-                // Prefer wider glyphs on near-ties so "m" beats "r" + "n".
-                if best.is_none_or(|(_, b, bw)| sim > b + 0.02 || (sim > b - 0.02 && gw > bw)) {
-                    best = Some((g.ch, sim, gw));
+                if sim < self.accept - 0.1 {
+                    continue;
                 }
-            }
-            match best {
-                Some((ch, sim, w)) if sim >= ACCEPT => {
-                    out.push((ch, sim));
-                    x += w;
-                    while x < s.x1 && !(s.y0..s.y1).any(|y| bm.at(x as i32, y as i32)) {
-                        x += 1;
-                    }
-                }
-                _ => {
-                    out.push(('?', 0.0));
-                    break;
+                let cand = score + sim * gw as f32;
+                if best[x + gw].is_none_or(|(b, _, _)| cand > b) {
+                    best[x + gw] = Some((cand, x, gi));
                 }
             }
         }
+        if best[w].is_none() {
+            return vec![(None, 0.0)];
+        }
+        let mut out = Vec::new();
+        let mut x = w;
+        while x > 0 {
+            let (score, prev, gi) = best[x].expect("reachable");
+            if gi != usize::MAX {
+                let gain = score - best[prev].map_or(0.0, |b| b.0);
+                out.push((Some(&self.glyphs[gi]), gain / (x - prev) as f32));
+            }
+            x = prev;
+        }
+        out.reverse();
         out
+    }
+}
+
+fn push_glyph(text: &mut String, g: Option<&Glyph>) {
+    match g {
+        Some(g) => {
+            text.push(g.ch);
+            text.extend(g.ch2);
+        }
+        None => text.push('?'),
     }
 }
 
@@ -407,6 +562,9 @@ mod gdi {
 
     use super::{Atlas, Bitmap, Glyph};
 
+    /// Characters combined into pair glyphs when GDI draws them touching.
+    const PAIR_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,'-/()";
+
     /// Printable ASCII, letters first so ambiguous shapes (`l`/`I`/`|`) resolve to letters.
     const CHARS: &str =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;'\"!?-+=/\\()[]<>{}%&*#@$^_~`|";
@@ -414,8 +572,13 @@ mod gdi {
     impl Atlas {
         /// Render a system font 1-bit with GDI, exactly as a classic Win32
         /// client draws it. `px` is the em height (LOGFONT lfHeight = -px).
-        pub fn from_gdi(face: &str, px: i32, bold: bool) -> windows::core::Result<Atlas> {
-            let name = format!("gdi:{face}:{px}{}", if bold { ":bold" } else { "" });
+        /// `style`: `""` (regular), `"bold"` (the font's bold face), or
+        /// `"fakebold"` (regular drawn twice, 1 px apart, as the game does
+        /// for quest titles).
+        pub fn from_gdi(face: &str, px: i32, style: &str) -> windows::core::Result<Atlas> {
+            let bold = style == "bold";
+            let fake_bold = style == "fakebold";
+            let name = format!("gdi:{face}:{px}{}{style}", if style.is_empty() { "" } else { ":" });
             let face_w: Vec<u16> = face.encode_utf16().chain([0]).collect();
             // SAFETY: GDI objects are created, used, and released within this block.
             unsafe {
@@ -464,24 +627,43 @@ mod gdi {
                 let sp: Vec<u16> = " ".encode_utf16().collect();
                 let _ = GetTextExtentPoint32W(dc, &sp, &mut space);
                 let mut atlas = Atlas::new(&name, (space.cx as u32).max(2));
+                atlas.accept = super::ACCEPT_GDI;
 
-                for ch in CHARS.chars() {
+                let render = |text: &str| -> Option<(Bitmap, i32, bool)> {
                     std::ptr::write_bytes(bits as *mut u8, 0, (w * h * 4) as usize);
-                    let s: Vec<u16> = ch.to_string().encode_utf16().collect();
+                    let s: Vec<u16> = text.encode_utf16().collect();
                     let _ = TextOutW(dc, pad, pad, &s);
                     let _ = GdiFlush();
                     let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
-                    let full = Bitmap {
+                    let mut full = Bitmap {
                         w: w as u32,
                         h: h as u32,
                         bits: px.as_chunks::<4>().0.iter().map(|p| p[1] > 127).collect(),
                     };
-                    if let Some((x0, y0, x1, y1)) = full.ink_bbox(0, w as u32, 0, h as u32) {
-                        atlas.glyphs.push(Glyph {
-                            ch,
-                            bitmap: full.crop(x0, y0, x1 - x0, y1 - y0),
-                            drop: y1 as i32 - 1 - baseline_row,
-                        });
+                    if fake_bold {
+                        for row in full.bits.chunks_mut(w as usize) {
+                            for x in (1..row.len()).rev() {
+                                row[x] |= row[x - 1];
+                            }
+                        }
+                    }
+                    let (x0, y0, x1, y1) = full.ink_bbox(0, w as u32, 0, h as u32)?;
+                    // One connected run of inked columns = the game will see one segment.
+                    let joined = (x0..x1).all(|x| (y0..y1).any(|y| full.at(x as i32, y as i32)));
+                    Some((full.crop(x0, y0, x1 - x0, y1 - y0), y1 as i32 - 1 - baseline_row, joined))
+                };
+                for ch in CHARS.chars() {
+                    if let Some((bitmap, drop, _)) = render(&ch.to_string()) {
+                        atlas.glyphs.push(Glyph { ch, ch2: None, bitmap, drop });
+                    }
+                }
+                // Letter pairs GDI draws touching ("ft", "tt", "rv"): segmentation
+                // cannot split them by empty columns, so match them whole.
+                for a in PAIR_CHARS.chars() {
+                    for b in PAIR_CHARS.chars() {
+                        if let Some((bitmap, drop, true)) = render(&format!("{a}{b}")) {
+                            atlas.glyphs.push(Glyph { ch: a, ch2: Some(b), bitmap, drop });
+                        }
                     }
                 }
                 SelectObject(dc, old_bmp);
@@ -531,7 +713,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn gdi_atlas_reads_its_own_rendering() {
-        let a = Atlas::from_gdi("Arial", 12, false).unwrap();
+        let a = Atlas::from_gdi("Arial", 12, "").unwrap();
         assert!(a.glyphs.len() > 80);
         // Compose "Rogue 15" from glyph bitmaps with 1 px gaps and a space.
         let word = "Rogue 15";
@@ -543,7 +725,7 @@ mod tests {
                 x += a.space + 1;
                 continue;
             }
-            let g = a.glyphs.iter().find(|g| g.ch == ch).unwrap();
+            let g = a.glyphs.iter().find(|g| g.ch == ch && g.ch2.is_none()).unwrap();
             let top = base + g.drop + 1 - g.bitmap.h as i32;
             for gy in 0..g.bitmap.h {
                 for gx in 0..g.bitmap.w {
@@ -555,5 +737,31 @@ mod tests {
             x += g.bitmap.w + 1;
         }
         assert_eq!(a.read(&img).lines, vec![word.to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+
+    fn bitmap(rows: &[&str]) -> Bitmap {
+        Bitmap {
+            w: rows[0].len() as u32,
+            h: rows.len() as u32,
+            bits: rows.iter().flat_map(|r| r.chars().map(|c| c == '#')).collect(),
+        }
+    }
+
+    #[test]
+    fn erases_dashed_underline_but_not_monospaced_digits() {
+        let mut underline = bitmap(&["#.#.#.#...........", "..................", "##.##.##.##.##.##."]);
+        underline.erase_dashed_rules();
+        assert!(underline.bits[36..].iter().all(|&b| !b), "dashed rule cleared");
+        assert!(underline.bits[0], "text row kept");
+        // Stacked strokes of digit sprites: regular runs, but not 1 px tall.
+        let digits = bitmap(&["#..#..#..#..#..#..", "#..#..#..#..#..#..", "#..#..#..#..#..#.."]);
+        let mut d = digits.clone();
+        d.erase_dashed_rules();
+        assert_eq!(d, digits);
     }
 }

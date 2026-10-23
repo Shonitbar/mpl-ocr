@@ -34,6 +34,8 @@ pub type Result<T, E = RecogError> = std::result::Result<T, E>;
 pub struct Recognition {
     /// Text lines, top to bottom.
     pub lines: Vec<String>,
+    /// Per-line boxes in the recognizer's input pixels, when the engine reports them.
+    pub boxes: Vec<mapleocr_imgproc::Rect>,
     /// Engine-reported confidence, if the engine has one.
     pub confidence: Option<f32>,
 }
@@ -54,6 +56,10 @@ pub enum Value {
         text: String,
     },
     Map(MapName),
+    /// Every text line in the ROI with its client-pixel box (screen scans, chat).
+    Lines {
+        lines: Vec<TextLine>,
+    },
     Number {
         value: i64,
     },
@@ -67,8 +73,21 @@ pub enum Value {
         value: i64,
         percent: f32,
     },
+    /// NPC dialogue: the NPC's text and the selectable options.
+    Dialogue {
+        text: String,
+        options: Vec<String>,
+    },
     /// The ROI is visible but holds no text (e.g. a collapsed minimap).
     Empty,
+    /// The ROI's window is not open.
+    Hidden,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TextLine {
+    pub text: String,
+    pub rect: mapleocr_imgproc::Rect,
 }
 
 /// A recognized value for one ROI, with provenance and timing.
