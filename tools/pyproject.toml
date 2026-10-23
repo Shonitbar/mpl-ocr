@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mapleocr-tools"
+version = "0.0.1"
+description = "Offline tooling for mpl-ocr (font identification, datasets, training)"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2", "pillow>=11"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.390"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mapleocr_tools"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["mapleocr_tools", "tests"]
+pythonVersion = "3.11"
+pythonPlatform = "Windows"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"

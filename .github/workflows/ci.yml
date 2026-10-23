@@ -21,6 +21,23 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  tools:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m venv .venv
+      - run: .venv/Scripts/python -m pip install -e ".[dev]"
+      - run: .venv/Scripts/ruff check .
+      - run: .venv/Scripts/ruff format --check .
+      - run: .venv/Scripts/pyright
+      - run: .venv/Scripts/python -m pytest -q
+
   deny:
     runs-on: ubuntu-latest
     steps:
