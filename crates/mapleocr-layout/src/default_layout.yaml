@@ -15,6 +15,9 @@ anchors:
     origin: top_left
     rect: [6, 7, 46, 11]
     search: [0, 0, 420, 260]
+  status_lv:                # "LV." label at the left end of the bottom status bar
+    origin: bottom_center
+    rect: [-390.4, -26.9, 26.9, 19.2]
 
 rois:
   map_name:                 # two lines: region ("Victoria Road") and map ("Henesys Market")
@@ -25,3 +28,42 @@ rois:
     crop: panel             # minimap width varies; stop at the panel's right edge
     parse: map_name
     settle_frames: 2        # map changes fade; wait until pixels are stable
+
+  # Bottom status bar: sprite digits and 1-bit Arial, read by the glyph tier
+  # on the native grid. Sprite atlases are learned from your own captures
+  # (`mapleocr atlas learn`); until then these ROIs fall back to OCR.
+  level:                    # white digits in orange boxes
+    anchor: status_lv
+    rect: [32, -1.3, 30.7, 19.2]
+    recognizer: glyph
+    font: learned:status_level
+    key: white
+    parse: int
+  job:
+    anchor: status_lv
+    rect: [69, -4.5, 101, 12.5]
+    recognizer: glyph
+    font: gdi:Arial:12
+  character_name:
+    anchor: status_lv
+    rect: [69, 9.5, 101, 11]
+    recognizer: glyph
+    font: gdi:Arial:12
+  hp:                       # "[544/554]"
+    anchor: status_lv
+    rect: [227.5, -5, 53, 13]
+    recognizer: glyph
+    font: learned:status_digits
+    parse: ratio
+  mp:                       # "[104/448]"
+    anchor: status_lv
+    rect: [338.5, -5, 54, 13]
+    recognizer: glyph
+    font: learned:status_digits
+    parse: ratio
+  exp:                      # "554 [7.86%]"
+    anchor: status_lv
+    rect: [454, -5, 74, 13]
+    recognizer: glyph
+    font: learned:status_digits
+    parse: exp

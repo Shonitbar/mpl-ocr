@@ -77,8 +77,11 @@ pub struct RoiSpec {
     pub anchor: String,
     /// Relative to the anchor's top-left.
     pub rect: NativeRect,
-    /// Recognizer tier, e.g. `ocr`.
+    /// Recognizer tier: `ocr` or `glyph`.
     pub recognizer: String,
+    /// Glyph font: `gdi:<face>:<px>[:bold]` or `learned:<name>`.
+    #[serde(default)]
+    pub font: Option<String>,
     /// Color key applied before recognition: `luma`, `white`, `#rrggbb`.
     #[serde(default)]
     pub key: Option<String>,

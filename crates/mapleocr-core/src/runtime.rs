@@ -15,7 +15,7 @@ use mapleocr_layout::{AnchorTemplates, Calibration, Layout, calibrate};
 use mapleocr_recog::Reading;
 
 use crate::config::Config;
-use crate::pipeline::{Packs, Pipeline};
+use crate::pipeline::{Grid, Packs, Pipeline};
 use crate::{Error, Result, data_dir};
 
 /// How long the capture thread blocks per wait; bounds shutdown latency only.
@@ -105,6 +105,7 @@ struct Job {
     hash: u64,
     frame_id: u64,
     captured_at: i64,
+    grid: Grid,
     image: BgraImage,
 }
 
@@ -126,7 +127,8 @@ impl MapleOcr {
         let selector = if opts.selector.is_empty() { cfg.target.clone().unwrap_or_default() } else { opts.selector };
         let backend = opts.backend.unwrap_or(cfg.backend);
         let packs = Packs::load(&opts.data_dir)?;
-        let pipeline = Pipeline::new(&opts.layout, opts.rois.as_deref(), packs)?;
+        let atlas_dir = opts.data_dir.join("atlas");
+        let pipeline = Pipeline::new(&opts.layout, opts.rois.as_deref(), packs, Some(&atlas_dir))?;
         let names = pipeline.roi_names();
         let settle: Vec<u32> = (0..names.len()).map(|i| pipeline.settle_frames(i)).collect();
 
@@ -314,6 +316,7 @@ fn capture_loop(
             calib = None; // resized: recalibrate on the next frame
             continue;
         }
+        let scale = calib.as_ref().map_or(1.0, |c| c.scale);
         for (i, (st, roi)) in states.iter_mut().zip(frame.rois).enumerate() {
             let h = hash_pixels(roi.data());
             if h != st.last_hash {
@@ -329,6 +332,7 @@ fn capture_loop(
                     hash: h,
                     frame_id: frame.frame_id,
                     captured_at: frame.acquired.0,
+                    grid: Grid { origin: (roi.rect().x, roi.rect().y), scale },
                     image: roi.view().to_owned(),
                 };
                 if tx.send(job).is_err() {
@@ -374,7 +378,7 @@ fn worker(shared: Arc<Shared>, mut pipeline: Pipeline, rx: Receiver<Job>) {
                 shared.publish(i, r);
                 continue;
             }
-            match pipeline.recognize(i, job.image.view(), job.frame_id, job.captured_at) {
+            match pipeline.recognize(i, job.image.view(), job.grid, job.frame_id, job.captured_at) {
                 Ok(r) => {
                     hits += u64::from(r.engine == "cache");
                     if cache[i].len() >= CACHE_PER_ROI {

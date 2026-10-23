@@ -18,12 +18,12 @@ mod pipeline;
 mod runtime;
 
 pub use config::{Config, data_dir};
-pub use pipeline::{Packs, Pipeline};
+pub use pipeline::{Grid, Packs, Pipeline};
 #[cfg(windows)]
 pub use runtime::{MapleOcr, Options, Status, SubscriptionId};
 
 pub use mapleocr_layout::{AnchorTemplates, Calibration, Layout};
-pub use mapleocr_recog::{Reading, Value};
+pub use mapleocr_recog::{Atlas, Reading, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
