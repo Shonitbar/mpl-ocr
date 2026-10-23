@@ -9,8 +9,9 @@ tooltips, chat, and more. Screen pixels in, structured readings out.
 > responsible for complying with the game's Terms of Service. See
 > [DISCLAIMER.md](DISCLAIMER.md).
 
-**Status: milestone 0.** Capture, target selection, dataset capture and the
-capture benchmark work. Recognizers come next. See [docs/design.md](docs/design.md).
+**Status: milestone 1 prototype.** The map name is read end to end: window
+discovery, auto-calibration, dirty detection, OCR, and data-pack snapping.
+See [docs/design.md](docs/design.md).
 
 ## Build
 
@@ -27,10 +28,18 @@ cargo build --release
 mapleocr targets
 mapleocr select --index 0            # or: --title MapleStory / --process MapleStory.exe
 
-# 2. Record samples: press F9 in game to save a frame, Ctrl+C to stop
+# 2. Read the map name live (calibrates on first run)
+mapleocr calibrate
+mapleocr watch map_name
+mapleocr read map_name               # one JSON reading
+
+# Optional: teach it your maps so readings snap to exact names
+mapleocr pack add-map "Victoria Road" "Henesys"
+
+# 3. Record samples: press F9 in game to save a frame, Ctrl+C to stop
 mapleocr capture-dataset --label "inventory open"
 
-# 3. Measure capture cost while the game is running
+# 4. Measure capture cost while the game is running
 mapleocr bench capture --seconds 10
 ```
 
@@ -43,6 +52,19 @@ Identify the UI font from labeled crops (Python tooling in `tools/`):
 python -m venv tools/.venv && tools/.venv/Scripts/pip install -e "tools[dev]"
 tools/.venv/Scripts/python -m mapleocr_tools.identify_font fixtures/local/font-samples.json
 ```
+
+## Use it from Rust
+
+```rust
+use mapleocr_core::{MapleOcr, Value};
+
+let ocr = MapleOcr::auto()?;            // find the game window, calibrate
+ocr.subscribe(&["map_name"], |r| {
+    if let Value::Map(m) = &r.value { println!("{} / {}", m.region, m.name) }
+})?;
+```
+
+See [crates/mapleocr-core/examples/map_name.rs](crates/mapleocr-core/examples/map_name.rs).
 
 ## License
 

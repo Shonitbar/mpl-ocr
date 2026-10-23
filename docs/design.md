@@ -18,10 +18,11 @@ Living document. Numbers are measured, not assumed; each one names its setup.
 |---|---|---|
 | `mapleocr-capture` | M0 | target discovery/selection, WGC + DXGI backends, GPU ROI crop |
 | `mapleocr-cli` | M0 | `targets`, `select`, `capture-dataset`, `bench capture` |
+| `mapleocr-imgproc` | M1 | image views, resampling, NCC template search, xxh3 ROI hashing |
 | `mapleocr-layout` | M1 | YAML ROI registry (anchor-relative), auto-calibration |
-| `mapleocr-recog` | M2–M4 | glyph, sprite-digit, icon, CRNN, fallback OCR behind `Recognizer` |
-| `mapleocr-semantic` | M5 | parsing + fuzzy snapping against data packs |
-| `mapleocr-core` | M1+ | orchestration, dirty detection, cache, lock-free result ring |
+| `mapleocr-recog` | M1 (fallback OCR); M2–M4 | `Recognizer` trait, `Reading`, preprocessing; glyph, sprite-digit, icon, CRNN later |
+| `mapleocr-semantic` | M1 (maps) | parsing + fuzzy snapping against user-built data packs |
+| `mapleocr-core` | M1 | `MapleOcr` runtime: capture thread, dirty detection, cache, recognition worker |
 | `mapleocr-py`, `mapleocr-server` | M5 | PyO3 bindings, WebSocket + shared memory + C ABI |
 
 Crates get added in the milestone that needs them. There are no empty stubs.
@@ -94,6 +95,65 @@ busy rendering the game. Candidate optimizations, to be measured before
 they're adopted: double-buffered staging (map frame N-1 while N copies, which trades
 one frame of latency, so probably not), a single atlas staging texture (one `Map`
 instead of N), `MinUpdateInterval` to cap delivery rate per subscription.
+
+## M1: map name end to end
+
+```
+capture thread                          recognition worker
+  WGC frame ──► per-ROI xxh3 ──changed+settled──► raw-hash cache ─► preprocess (key, panel crop)
+                 (unchanged: no work)              │                 └─► prepared-hash cache ─► WinOCR
+                                                   └──────────────────────────────► parse + pack snap
+                                                                  latest (ArcSwap, lock-free read) + subscribers (on change)
+```
+
+- **Layout** (`crates/mapleocr-layout/src/default_layout.yaml`): one anchor,
+  the minimap's "MINI MAP" caption, and the `map_name` ROI relative to it, in
+  native units (canvas 768 lines). The user can override it with
+  `%LOCALAPPDATA%\mapleocr\layout.yaml`.
+- **Calibration**: scale = client height / 768. On first run the anchor
+  template is cut from the user's screen at its default position (only if
+  it is textured, i.e. real UI) and saved to `%LOCALAPPDATA%\mapleocr\anchors`.
+  Later runs locate it by coarse-to-fine NCC; below 0.75 the default position is
+  used. The runtime recalibrates when the client size changes.
+- **Dirty detection**: xxh3 per ROI per frame. A ROI is sent for recognition
+  only when its hash changed and then stayed stable for `settle_frames` (2 for
+  the map name, which fades during map changes).
+- **Two caches**: one on the raw ROI hash, and one on the hash of the
+  *prepared* image (color-keyed + cropped to the minimap panel). The minimap
+  width varies, so the ROI also covers animated world pixels; those change the
+  raw hash but not the prepared one, so they never reach OCR.
+- **Fallback OCR = `Windows.Media.Ocr`**, built into Windows, instead of
+  PaddleOCR/ONNX for M1: no model download, no extra runtime, and it measured
+  100% on our fixtures at ~3 ms. It sits behind `Recognizer`, so the ONNX engine
+  can replace or complement it when the CRNN tier lands (M4).
+- **Preprocessing** (measured): white-text key, panel crop, no upscale, 16 px
+  padding. With 8 px padding Windows OCR dropped short second lines ("Henesys"),
+  and 2× upscale was slower with no gain.
+- **Semantic**: two lines → `{region, name}`; snapped to
+  `%LOCALAPPDATA%\mapleocr\packs\maps.json` (built with `mapleocr pack
+  add-map`) at similarity ≥ 0.75. Snapped readings carry confidence = similarity;
+  unchecked ones carry 0.5.
+- **Notifications** fire only when the value changes; `read()` always returns the
+  latest (lock-free `ArcSwap`).
+- The capture thread makes itself per-monitor DPI aware, so embedding apps don't
+  have to. The example caught this: without it, a 125%-scaled desktop gave
+  wrong ROIs.
+
+### M1 measurements
+Setup as in M0 (Ryzen 5 3600, 1920×1200 windowed, release build).
+
+| measurement | result |
+|---|---|
+| `bench fixtures`: 20 labeled frames, 4 distinct maps | **100% exact** (region + name), with or without pack |
+| OCR recognize time (WinOCR, incl. preprocessing) | p50 2.9 ms, p95 3.4 ms; first call ~14 ms (engine warm-up) |
+| live: capture → reading published (fresh OCR) | 3.6–4.4 ms (plus 2 settle frames, ≈33 ms after the change) |
+| live: cache hit → published | 0.4 ms |
+| live 30 s, map_name only, ~56 fps | 1680 frames, 88 jobs, 87 cache hits, **CPU 3.95% of one core** |
+
+Known gaps (prototype): anchor-loss detection (only resize triggers
+recalibration), job images are allocated per change (not pooled), and the
+results ring buffer and shared-memory feed are M5. The 20 fixtures come from one
+session and four maps, so accuracy will need a broader set.
 
 ## Font identification (M0)
 
