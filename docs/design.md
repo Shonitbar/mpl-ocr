@@ -95,34 +95,77 @@ they're adopted: double-buffered staging (map frame N-1 while N copies, which tr
 one frame of latency, so probably not), a single atlas staging texture (one `Map`
 instead of N), `MinUpdateInterval` to cap delivery rate per subscription.
 
-## Font identification (M0, in progress)
+## Font identification (M0)
 
-Preliminary observations from one 1920×1200 capture, to be confirmed by
-`identify-font` on a proper sample set:
+Tool: `tools/mapleocr_tools/identify_font.py` (Python, offline; see "Tooling"
+below). Input is labeled text crops from `capture-dataset` frames. Method: render
+each candidate word with **GDI, non-antialiased** (how a classic Win32 client
+draws text), upscale by a candidate factor, take the best normalized
+cross-correlation (NCC) against the capture, and score per word so small
+advance-width differences don't accumulate across a line. GDI matters: Pillow/FreeType
+hint 11–14 px differently, and with FreeType the best line score was only 0.70.
 
-- **Status bar numbers** (`HP[257/532]`, `MP[...]`, `EXP ...[..%]`) are
-  sprite digits with fixed shapes, so a template/sprite matcher is ideal.
-- **UI text** (map name, quest helper, party list, chat, system messages) is a
-  **1-bit bitmap font** (no anti-aliasing, no ClearType fringes) that the
-  client renders at a lower internal resolution and **upscales by a
-  non-integer factor (~1.5×) with nearest-neighbour**. Evidence: 55–58% of
-  adjacent columns in UI regions are pixel-identical vs. 7% in the game world,
-  and mixed 1- and 2-pixel stroke widths, e.g. "Need" rendering as "Heed".
-  Consequence: glyph templates vary with sub-pixel phase at output
-  resolution, so the glyph matcher must first estimate the scale factor and
-  phase per ROI and resample back to the native grid, then match exact 1-bit
-  glyphs. `identify-font` measures this per ROI.
-- Chat and system messages render over translucent or busy backgrounds, so they need
-  color-keyed binarization before matching.
+Data: 20 frames, windowed 1920×1200 at 120 DPI, one session, 8 labeled text
+samples plus 2 status-bar samples.
 
-Per-ROI decision table: filled in after `identify-font` runs on the sample set.
+### Findings
 
-| ROI | candidate engine | status |
+1. **UI scale is uniform ×1.5625 = client height / 768**, estimated at ×1.560.
+   The client draws its UI on a 768-line canvas and the window stretches it with
+   a **smooth filter** (bicubic/bilinear; nearest-neighbour scores clearly
+   worse: 0.89 vs 0.96). The dark undershoot halos around strokes confirm a
+   bicubic-type kernel. *An earlier note here claimed nearest-neighbour
+   upscaling. That was wrong.*
+   At ×25/16 the sub-pixel phase pattern repeats every 16 native = 25 screen
+   pixels.
+2. **The source text is 1-bit (non-antialiased) GDI Arial.** For every
+   identified ROI, the non-AA render beats grayscale-AA and ClearType renders.
+
+| ROI | font (native px) | NCC | margin to next family | verdict |
+|---|---|---|---|---|
+| item tooltip body | Arial 12 regular | 0.961 | 0.146 | identified |
+| NPC dialogue + options | Arial 12 regular | 0.905 | 0.221 | identified |
+| chat (incl. yellow system lines) | Arial 14 regular | 0.875 | 0.207 | probable |
+| quest helper lines | Arial 11 regular | 0.867 | 0.090 | probable |
+| quest helper titles | Arial 11 bold | 0.871 | 0.029 | probable |
+| minimap map name | none (best Tahoma 11 bold) | 0.653 | 0.003 | unresolved |
+| HP/MP/EXP numbers | none | 0.448 | n/a | unresolved: sprites |
+
+"Probable" rows score lower because their crops sit on gradients or
+translucent backgrounds; the font ranking itself is stable.
+
+3. Text over translucent or busy backgrounds (chat log, `[Notice]` lines)
+   **must be color-keyed** before matching. The yellow notice line scores 0.92
+   keyed vs 0.37 on plain luma.
+4. The map name is white with a drop shadow and doesn't match any installed
+   font. It may be a stylized render or a font that isn't installed (Gulim/Dotum
+   are absent on the dev machine). The client process is protected, so its
+   install path can't be read from the process; `--client-dir` lets a user
+   point the tool at their own install to try any font files there.
+
+### Decisions
+
+| ROI | engine | why |
 |---|---|---|
-| HP/MP/EXP numbers | sprite-digit matcher | likely |
-| map name (minimap) | glyph matcher (native-grid) | likely |
-| quest helper / party | glyph matcher | likely |
-| chat / system log | glyph matcher + color key, CRNN fallback | open |
-| tooltips / NPC dialogue | glyph matcher or CRNN | open |
-| damage numbers | sprite-digit matcher | expected |
-| inventory | icon matcher | expected |
+| tooltip, NPC dialogue, quest helper, chat | **glyph matcher** | 1-bit Arial at known sizes. Templates are generated **locally on the user's machine** from the system's Arial via GDI, then upscaled with the measured kernel per sub-pixel phase (16 phases at ×25/16). Nothing is shipped. CRNN stays as the fallback for low confidence. |
+| chat | glyph matcher **+ per-channel color key** (chat type colors) | translucent background |
+| map name | **glyph atlas built from captures** (`build-atlas`) + data-pack snapping | font unresolved, but the set of map names is finite |
+| HP/MP/EXP numbers | **sprite-digit matcher**, atlas from captures | sprite digits, ~12 symbols |
+| damage numbers | sprite-digit matcher | visibly sprite-rendered (frames 15, 18–20) |
+| inventory / item slots | icon matcher | grids of icons |
+
+Open: confirm the scale model (`client height / 768`) at a second window size and
+in fullscreen. The current data is all 1920×1200 windowed.
+
+## Tooling
+
+Offline analysis and training tools are Python, in `tools/` (`pip install -e
+tools[dev]`; ruff + pyright + pytest). `identify-font` lives there instead of in
+`mapleocr-cli` because it needs GDI rendering and array maths, never runs on
+the hot path, and feeds the Python training pipeline.
+
+```
+python -m mapleocr_tools.identify_font fixtures/local/font-samples.json --out report.json
+```
+Samples and reports stay in `fixtures/local/` (git-ignored) because they contain
+game pixels and text.
