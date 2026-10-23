@@ -125,3 +125,28 @@ rois:
     font: gdi:Arial:12
     key: dark
     parse: dialogue
+
+# UI without a fixed position, found on low-rate full-frame scout captures.
+detectors:
+  tooltip:                  # item tooltips (translucent navy boxes)
+    kind: tooltip
+    font: gdi:Arial:12+gdi:Arial:12:bold
+  item_inventory:           # learn the title once: mapleocr window learn item_inventory_title ...
+    kind: window
+    template: item_inventory_title
+    grid:                   # 5 x 6 item slots
+      origin: [8.3, 48.6]
+      pitch: [35.84, 34.56]
+      size: [32, 30.7]
+      cols: 5
+      rows: 6
+      quantity_font: learned:slot_digits
+    fields:
+      mesos:
+        rect: [35, 262, 131, 17]
+        recognizer: ocr
+        key: dark
+        parse: digits
+  damage:                   # floating damage numbers (learned:damage_digits)
+    kind: damage
+    font: learned:damage_digits

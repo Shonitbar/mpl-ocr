@@ -118,6 +118,73 @@ pub struct Layout {
     pub canvas_height: f32,
     pub anchors: BTreeMap<String, AnchorSpec>,
     pub rois: BTreeMap<String, RoiSpec>,
+    /// UI that moves or appears anywhere (tooltips, windows, damage numbers),
+    /// found on low-rate full-frame "scout" captures.
+    #[serde(default)]
+    pub detectors: BTreeMap<String, DetectorSpec>,
+}
+
+/// How to find and read UI that has no fixed position.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DetectorSpec {
+    /// Item tooltips: translucent navy boxes, found by color.
+    Tooltip { font: String },
+    /// A movable window, found by its learned title template
+    /// (`mapleocr window learn <template>`). Positions are native units
+    /// relative to the template's top-left.
+    Window {
+        template: String,
+        #[serde(default)]
+        grid: Option<GridSpec>,
+        #[serde(default)]
+        fields: BTreeMap<String, FieldSpec>,
+    },
+    /// Floating damage numbers: orange sprite digits over the world.
+    Damage { font: String },
+}
+
+/// An item-slot grid inside a window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GridSpec {
+    pub origin: [f32; 2],
+    pub pitch: [f32; 2],
+    pub size: [f32; 2],
+    pub cols: u32,
+    pub rows: u32,
+    /// Glyph font for the quantity printed in each slot's bottom-left corner.
+    pub quantity_font: String,
+}
+
+/// A text field inside a window (same recognizer options as a ROI).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FieldSpec {
+    pub rect: NativeRect,
+    pub recognizer: String,
+    #[serde(default)]
+    pub font: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub parse: Option<String>,
+}
+
+impl FieldSpec {
+    /// As a ROI spec, for the recognition pipeline.
+    pub fn as_roi(&self) -> RoiSpec {
+        RoiSpec {
+            anchor: String::new(),
+            rect: self.rect,
+            recognizer: self.recognizer.clone(),
+            font: self.font.clone(),
+            key: self.key.clone(),
+            crop: None,
+            parse: self.parse.clone(),
+            settle_frames: 0,
+            min_interval_ms: 0,
+            opt_in: false,
+        }
+    }
 }
 
 impl Layout {
@@ -237,6 +304,35 @@ impl AnchorTemplates {
         t.images.insert(name.to_owned(), g);
         t.save(dir)?;
         Ok(t)
+    }
+
+    /// Add (or replace) one named template cut from `frame` at `rect`
+    /// (client pixels), e.g. a window title, and save the set.
+    pub fn learn_rect(dir: &Path, layout: &Layout, name: &str, frame: BgraView<'_>, rect: Rect) -> Result<Self> {
+        let client = (frame.width, frame.height);
+        let mut t =
+            Self::load(dir)?.unwrap_or_else(|| Self { scale: layout.scale_for(client), images: BTreeMap::new() });
+        let k = t.scale / layout.scale_for(client);
+        let g = Gray::from_bgra(frame.crop(rect));
+        let g = if (k - 1.0).abs() < 1e-3 {
+            g
+        } else {
+            g.resize((g.width as f32 * k).round() as u32, (g.height as f32 * k).round() as u32)
+        };
+        t.images.insert(name.to_owned(), g);
+        t.save(dir)?;
+        Ok(t)
+    }
+
+    /// A template rescaled from its capture scale to `scale`.
+    pub fn scaled(&self, name: &str, scale: f32) -> Option<Gray> {
+        let g = self.images.get(name)?;
+        let k = scale / self.scale;
+        Some(if (k - 1.0).abs() < 1e-3 {
+            g.clone()
+        } else {
+            g.resize((g.width as f32 * k).round() as u32, (g.height as f32 * k).round() as u32)
+        })
     }
 
     /// `Ok(None)` if no templates were saved yet.
