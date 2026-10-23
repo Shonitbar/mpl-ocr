@@ -112,6 +112,10 @@ pub trait CaptureBackend {
     /// hot path (at calibration or after a resize).
     fn set_rois(&mut self, rois: &[Rect]) -> Result<()>;
 
+    /// Which ROIs to copy for the next frames (cheap; call per frame).
+    /// Inactive ROIs keep their last pixels.
+    fn set_active(&mut self, active: &[bool]);
+
     /// Wait up to `timeout` for a new frame. `Ok(None)` means nothing changed
     /// on screen in that time (or the target is minimized).
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<Frame<'_>>>;

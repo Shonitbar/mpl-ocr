@@ -199,6 +199,10 @@ impl CaptureBackend for WgcBackend {
         self.stager.set_rois(rois)
     }
 
+    fn set_active(&mut self, active: &[bool]) {
+        self.stager.set_active(active);
+    }
+
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<Frame<'_>>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CaptureError::TargetLost);

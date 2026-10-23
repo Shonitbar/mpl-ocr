@@ -3,14 +3,14 @@
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Texture2D,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_SAMPLE_DESC,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
+use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_WAS_STILL_DRAWING, IDXGIAdapter};
 
 use crate::{CaptureError, Rect, Result, RoiImage};
 
@@ -54,17 +54,35 @@ pub struct RoiStager {
     format: DXGI_FORMAT,
     slots: Vec<Slot>,
     images: Vec<RoiImage>,
+    /// Inactive slots are neither copied nor mapped; their image keeps its last contents.
+    active: Vec<bool>,
 }
 
 impl RoiStager {
     pub fn new(device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
-        Self { device, context, format: DXGI_FORMAT_B8G8R8A8_UNORM, slots: Vec::new(), images: Vec::new() }
+        Self {
+            device,
+            context,
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            slots: Vec::new(),
+            images: Vec::new(),
+            active: Vec::new(),
+        }
     }
 
     pub fn set_rois(&mut self, rois: &[Rect]) -> Result<()> {
         self.images = rois.iter().map(|&r| RoiImage::new(r)).collect();
         self.slots = rois.iter().map(|_| Slot { tex: None, copied: (0, 0, 0, 0) }).collect();
+        self.active = vec![true; rois.len()];
         self.create_textures()
+    }
+
+    /// Choose which ROIs the next `stage` copies. Shorter than the ROI list
+    /// leaves the rest active.
+    pub fn set_active(&mut self, active: &[bool]) {
+        for (a, &b) in self.active.iter_mut().zip(active) {
+            *a = b;
+        }
     }
 
     fn create_textures(&mut self) -> Result<()> {
@@ -110,7 +128,7 @@ impl RoiStager {
         }
         let (sw, sh) = (desc.Width as i64, desc.Height as i64);
 
-        for (slot, img) in self.slots.iter_mut().zip(&self.images) {
+        for ((slot, img), _) in self.slots.iter_mut().zip(&self.images).zip(&self.active).filter(|(_, a)| **a) {
             let r = img.rect();
             let x0 = origin.0 as i64 + r.x as i64;
             let y0 = origin.1 as i64 + r.y as i64;
@@ -138,7 +156,7 @@ impl RoiStager {
             unsafe { self.context.CopySubresourceRegion(tex, 0, dx, dy, 0, src, 0, Some(&bx)) };
         }
 
-        for (slot, img) in self.slots.iter().zip(self.images.iter_mut()) {
+        for ((slot, img), _) in self.slots.iter().zip(self.images.iter_mut()).zip(&self.active).filter(|(_, a)| **a) {
             let (dx, dy, cw, ch) = slot.copied;
             let full = cw == img.width() && ch == img.height();
             let row_bytes = img.width() as usize * 4;
@@ -151,8 +169,28 @@ impl RoiStager {
                 continue;
             }
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            // SAFETY: staging texture with CPU read access; unmapped below.
-            unsafe { self.context.Map(tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
+            // Don't let the driver spin while the GPU (busy rendering the game)
+            // finishes our copies: poll without waiting. Yield for the first
+            // millisecond (copies usually land in ~0.4 ms), then sleep.
+            // Measured: blocking Map doubled capture CPU; sleeping right away
+            // raised p50 staging latency from 0.46 to 2.5 ms.
+            let t0 = std::time::Instant::now();
+            loop {
+                // SAFETY: staging texture with CPU read access; unmapped below.
+                match unsafe {
+                    self.context.Map(tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut mapped))
+                } {
+                    Ok(()) => break,
+                    Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => {
+                        if t0.elapsed() < std::time::Duration::from_millis(1) {
+                            std::thread::yield_now();
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
             let pitch = mapped.RowPitch as usize;
             let base = mapped.pData as *const u8;
             let (x_off, copy_bytes) = (dx as usize * 4, cw as usize * 4);

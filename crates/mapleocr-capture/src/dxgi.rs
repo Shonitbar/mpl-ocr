@@ -120,6 +120,10 @@ impl CaptureBackend for DxgiBackend {
         self.stager.set_rois(rois)
     }
 
+    fn set_active(&mut self, active: &[bool]) {
+        self.stager.set_active(active);
+    }
+
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<Frame<'_>>> {
         if self.dup.is_none() {
             // Mode switch or secure desktop; retry duplication. There is no

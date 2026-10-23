@@ -89,6 +89,13 @@ impl Capture {
         self.backend.set_rois(rois)
     }
 
+    /// Which ROIs to copy off the GPU for the next frames. Inactive ROIs keep
+    /// their last pixels; use this to skip windows that are closed or ROIs
+    /// that are not due yet.
+    pub fn set_active(&mut self, active: &[bool]) {
+        self.backend.set_active(active);
+    }
+
     pub fn last_frame(&self) -> Option<Frame<'_>> {
         self.backend.last_frame()
     }
