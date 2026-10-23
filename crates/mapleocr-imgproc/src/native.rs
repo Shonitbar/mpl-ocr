@@ -41,21 +41,33 @@ pub fn to_native(img: &Gray, origin: (i32, i32), scale: f32) -> (Gray, (i32, i32
 /// variance). Absorbs small errors in the assumed canvas size, which otherwise
 /// put 1-px strokes between native pixels.
 pub fn to_native_aligned(img: &Gray, origin: (i32, i32), scale: f32) -> Gray {
+    to_native_phase(img, origin, scale, best_phase(img, origin, scale))
+}
+
+/// The sub-pixel grid phase (quarters of a native pixel per axis) that makes
+/// `img` crispest. Constant for a fixed ROI and window size, so callers can
+/// compute it once and reuse it with [`to_native_phase`].
+pub fn best_phase(img: &Gray, origin: (i32, i32), scale: f32) -> (f64, f64) {
     const PHASES: [f64; 4] = [0.0, 0.25, 0.5, 0.75];
-    let mut best: Option<(f32, Gray)> = None;
+    let mut best = (f32::MIN, (0.0, 0.0));
     for py in PHASES {
         for px in PHASES {
-            let o = (origin.0 as f64 - px * scale as f64, origin.1 as f64 - py * scale as f64);
-            let (g, _) = resample(img, o, scale);
+            let g = to_native_phase(img, origin, scale, (px, py));
             let n = g.data.len().max(1) as f32;
             let mean = g.data.iter().sum::<f32>() / n;
             let var = g.data.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
-            if best.as_ref().is_none_or(|(b, _)| var > *b) {
-                best = Some((var, g));
+            if var > best.0 {
+                best = (var, (px, py));
             }
         }
     }
-    best.map(|(_, g)| g).unwrap_or_default()
+    best.1
+}
+
+/// [`to_native`] with the native grid shifted by `phase` native pixels.
+pub fn to_native_phase(img: &Gray, origin: (i32, i32), scale: f32, phase: (f64, f64)) -> Gray {
+    let o = (origin.0 as f64 - phase.0 * scale as f64, origin.1 as f64 - phase.1 * scale as f64);
+    resample(img, o, scale).0
 }
 
 fn resample(img: &Gray, origin: (f64, f64), scale: f32) -> (Gray, (i32, i32)) {
