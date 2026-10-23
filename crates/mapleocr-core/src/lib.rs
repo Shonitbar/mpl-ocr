@@ -18,7 +18,7 @@ mod pipeline;
 mod runtime;
 
 pub use config::{Config, data_dir};
-pub use pipeline::{Grid, Packs, Pipeline};
+pub use pipeline::{Grid, Packs, Pipeline, font};
 #[cfg(windows)]
 pub use runtime::{MapleOcr, Options, Status, SubscriptionId};
 
