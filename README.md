@@ -18,8 +18,12 @@ See [docs/design.md](docs/design.md).
 Requires Rust (stable, MSVC toolchain) on Windows 10 2004+ / Windows 11.
 
 ```sh
-cargo build --release
+cargo install --path crates/mapleocr-cli --locked   # puts `mapleocr` in ~/.cargo/bin (on PATH)
 ```
+
+Open a new terminal afterwards if Rust was installed in this session. Rerun
+the command after pulling changes. Without installing, use
+`.\target\release\mapleocr.exe` after `cargo build --release`.
 
 ## Try it
 
