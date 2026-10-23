@@ -24,12 +24,26 @@ pub struct CalibrateArgs {
     /// in its default arrangement (minimap visible, top-left).
     #[arg(long)]
     bootstrap: bool,
+    /// Learn the template of an optional window's anchor (e.g. npc_dialogue)
+    /// from a saved full frame where that window is open. No live capture.
+    #[arg(long, requires = "image")]
+    learn_anchor: Option<String>,
+    /// Saved full-client frame for --learn-anchor.
+    #[arg(long)]
+    image: Option<PathBuf>,
     /// Save each ROI crop here (default fixtures/local/calibrate).
     #[arg(long, default_value = "fixtures/local/calibrate")]
     dump: PathBuf,
 }
 
 pub fn calibrate_cmd(a: CalibrateArgs) -> Result<()> {
+    if let (Some(name), Some(image)) = (&a.learn_anchor, &a.image) {
+        let frame = mapleocr_imgproc::load_png(image).with_context(|| format!("loading {}", image.display()))?;
+        let dir = data_dir()?.join("anchors");
+        let t = AnchorTemplates::learn_anchor(&dir, &layout()?, name, frame.view())?;
+        println!("learned anchor {name} ({} templates in {})", t.images.len(), dir.display());
+        return Ok(());
+    }
     let mut cap = a.target.open()?;
     let (w, h) = cap.client_size();
     cap.set_rois(&[mapleocr_capture::Rect::new(0, 0, w, h)])?;
@@ -156,6 +170,18 @@ pub fn watch(a: WatchArgs) -> Result<()> {
     }
     let s = ocr.status();
     let cpu = (crate::bench::cpu_time() - cpu0).as_secs_f64() / t0.elapsed().as_secs_f64() * 100.0;
+    let secs = t0.elapsed().as_secs_f64();
+    let pct = |ms: f64| ms / 10.0 / secs;
+    eprintln!(
+        "time per thread, % of one core: GPU staging {:.1}%, capture dispatch {:.1}%",
+        pct(s.stage_ms),
+        pct(s.dispatch_ms)
+    );
+    let mut by_roi = s.recog_ms.clone();
+    by_roi.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (name, ms, n) in by_roi.iter().filter(|r| r.2 > 0) {
+        eprintln!("  recognize {name:<16} {:>5.1}%  ({n} jobs, {:.2} ms avg)", pct(*ms), ms / *n as f64);
+    }
     eprintln!(
         "{} frames in {:.0} s, {} recognition jobs ({} cache hits), CPU {cpu:.2}% of one core",
         s.frames,

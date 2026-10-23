@@ -36,11 +36,12 @@ impl EngineArgs {
         let only = (!self.rois.is_empty()).then_some(self.rois.as_slice());
         let pipeline = Pipeline::new(&layout, only, Packs::load(&dir)?, Some(&dir.join("atlas")))?;
         let templates = AnchorTemplates::load(&dir.join("anchors"))?;
-        Ok(Offline { layout, pipeline, templates })
+        Ok(Offline { debug: false, layout, pipeline, templates })
     }
 }
 
 struct Offline {
+    debug: bool,
     layout: Layout,
     pipeline: Pipeline,
     templates: Option<AnchorTemplates>,
@@ -51,14 +52,23 @@ impl Offline {
         let calib = calibrate(&self.layout, img.view(), self.templates.as_ref());
         let mut out = Vec::new();
         for (i, name) in self.pipeline.roi_names().iter().enumerate() {
-            let rect = calib.rois[&**name];
-            let crop = img.view().crop(rect);
-            let grid = Grid { origin: (rect.x, rect.y), scale: calib.scale };
+            let crop = img.view().crop(calib.rois[&**name]);
+            let capture = img.view().crop(calib.capture[&**name]);
+            if self.debug {
+                let rect = calib.rois[&**name];
+                let grid = Grid { origin: (rect.x, rect.y), scale: calib.scale };
+                if let Some(pic) = self.pipeline.glyph_debug(i, crop, grid) {
+                    eprintln!(
+                        "--- {name} (native grid) ---
+{pic}"
+                    );
+                }
+            }
             if let Some((dir, stem)) = dump {
                 save_png(&dir.join(format!("{stem}_{name}_roi.png")), crop)?;
                 save_png(&dir.join(format!("{stem}_{name}_ocr.png")), self.pipeline.prepared(i, crop).view())?;
             }
-            out.push(self.pipeline.recognize(i, crop, grid, 0, 0)?);
+            out.push(self.pipeline.recognize_in(i, &calib, capture, 0, 0)?);
         }
         Ok((calib, out))
     }
@@ -69,10 +79,14 @@ pub fn describe(v: &Value) -> String {
         Value::Map(m) if m.region.is_empty() => m.name.clone(),
         Value::Map(m) => format!("{} / {}", m.region, m.name),
         Value::Text { text } => text.replace('\n', " | "),
+        Value::Lines { lines } => lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | "),
         Value::Number { value } => value.to_string(),
         Value::Ratio { current, max } => format!("{current}/{max}"),
         Value::Exp { value, percent } => format!("{value} ({percent:.2}%)"),
+        Value::Dialogue { text, options } if options.is_empty() => text.clone(),
+        Value::Dialogue { text, options } => format!("{text} || {}", options.join(" | ")),
         Value::Empty => "(empty)".into(),
+        Value::Hidden => "(hidden)".into(),
     }
 }
 
@@ -86,12 +100,16 @@ pub struct RecognizeArgs {
     /// Save each ROI crop and the image the recognizer saw into this directory.
     #[arg(long)]
     dump: Option<PathBuf>,
+    /// Print what the glyph matcher sees (binarized native-grid pixels).
+    #[arg(long)]
+    debug: bool,
     #[arg(long)]
     json: bool,
 }
 
 pub fn recognize(a: RecognizeArgs) -> Result<()> {
     let mut eng = a.engine.engine()?;
+    eng.debug = a.debug;
     if let Some(d) = &a.dump {
         std::fs::create_dir_all(d)?;
     }
@@ -244,15 +262,23 @@ pub fn bench_fixtures(a: FixtureBenchArgs) -> Result<()> {
 pub enum AtlasCmd {
     /// Teach a `learned:<name>` glyph atlas from one labeled ROI of a saved frame.
     Learn(LearnArgs),
-    /// Print an atlas's glyphs.
-    Show { name: String },
+    /// Print a font's glyphs: a learned atlas name or any spec (gdi:Arial:11:bold).
+    Show {
+        name: String,
+        /// Only these characters.
+        #[arg(long)]
+        chars: Option<String>,
+    },
 }
 
 #[derive(Args)]
 pub struct LearnArgs {
     /// Full client-area frame (e.g. `*_full.png` from capture-dataset).
+    /// Without it, the current frame is grabbed from the game.
     #[arg(long)]
-    image: PathBuf,
+    image: Option<PathBuf>,
+    #[command(flatten)]
+    target: crate::TargetArgs,
     /// ROI whose font is `learned:<name>`.
     #[arg(long)]
     roi: String,
@@ -264,6 +290,22 @@ pub struct LearnArgs {
     layout: Option<PathBuf>,
 }
 
+/// One full client-area frame from the live game.
+pub fn grab_frame(target: &crate::TargetArgs) -> Result<BgraImage> {
+    let mut cap = target.open()?;
+    let (w, h) = cap.client_size();
+    cap.set_rois(&[mapleocr_capture::Rect::new(0, 0, w, h)])?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(f) = cap.next_frame(std::time::Duration::from_millis(100))? {
+            return Ok(f.rois[0].view().to_owned());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("no frame within 5 s (is the game minimized?)");
+        }
+    }
+}
+
 pub fn atlas(cmd: AtlasCmd) -> Result<()> {
     let dir = data_dir()?.join("atlas");
     match cmd {
@@ -272,7 +314,10 @@ pub fn atlas(cmd: AtlasCmd) -> Result<()> {
             let Some(name) = eng.pipeline.learned_font(0).map(str::to_owned) else {
                 bail!("ROI {} does not use a learned:<name> glyph font", a.roi);
             };
-            let img = load_png(&a.image).with_context(|| format!("loading {}", a.image.display()))?;
+            let img = match &a.image {
+                Some(p) => load_png(p).with_context(|| format!("loading {}", p.display()))?,
+                None => grab_frame(&a.target)?,
+            };
             let calib = calibrate(&eng.layout, img.view(), eng.templates.as_ref());
             let rect = calib.rois[&a.roi];
             let native = eng.pipeline.native_ink(
@@ -285,13 +330,22 @@ pub fn atlas(cmd: AtlasCmd) -> Result<()> {
                 if path.exists() { mapleocr_core::Atlas::load(&path)? } else { mapleocr_core::Atlas::new(&name, 0) };
             let added = atlas.learn(&native, &a.text).map_err(|e| anyhow::anyhow!("{}: {e}", a.roi))?;
             atlas.save(&path)?;
-            let chars: String = atlas.glyphs.iter().map(|g| g.ch).collect();
+            let chars: String = atlas.glyphs.iter().filter(|g| g.ch2.is_none()).map(|g| g.ch).collect();
             println!("{name}: +{added} glyphs, now {} ({chars}) -> {}", atlas.glyphs.len(), path.display());
         }
-        AtlasCmd::Show { name } => {
-            let atlas = mapleocr_core::Atlas::load(&dir.join(format!("{name}.json")))?;
-            for g in &atlas.glyphs {
-                println!("'{}' {}x{} drop {}", g.ch, g.bitmap.w, g.bitmap.h, g.drop);
+        AtlasCmd::Show { name, chars } => {
+            let spec = if name.contains(':') { name.clone() } else { format!("learned:{name}") };
+            let atlas = mapleocr_core::font(&spec, Some(&dir))?.with_context(|| format!("no atlas {name}"))?;
+            for g in atlas.glyphs.iter().filter(|g| g.ch2.is_none() && chars.as_ref().is_none_or(|c| c.contains(g.ch)))
+            {
+                println!(
+                    "'{}{}' {}x{} drop {}",
+                    g.ch,
+                    g.ch2.map(String::from).unwrap_or_default(),
+                    g.bitmap.w,
+                    g.bitmap.h,
+                    g.drop
+                );
                 for row in g.bitmap.bits.chunks(g.bitmap.w.max(1) as usize) {
                     println!("  {}", row.iter().map(|&b| if b { '#' } else { '.' }).collect::<String>());
                 }
