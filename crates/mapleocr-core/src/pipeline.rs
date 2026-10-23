@@ -176,7 +176,8 @@ impl Pipeline {
             plans.push(RoiPlan { name: name.as_str().into(), spec: spec.clone(), key, crop, engine });
         }
         if let Some(o) = only
-            && let Some(missing) = o.iter().find(|n| !layout.rois.contains_key(n.as_str()))
+            && let Some(missing) =
+                o.iter().find(|n| !layout.rois.contains_key(n.as_str()) && !layout.detectors.contains_key(n.as_str()))
         {
             return Err(Error::UnknownRoi(missing.clone()));
         }
@@ -403,6 +404,11 @@ impl Pipeline {
             _ if raw.trim().is_empty() => (Value::Empty, 1.0, false),
             // An unknown glyph inside a number: report the text, never a guessed number.
             Some("int" | "ratio" | "exp") if raw.contains('?') => (Value::Text { text: raw.clone() }, 0.2, false),
+            // Amounts with thousands separators that OCR may space out ("10 ,505").
+            Some("digits") => match raw.chars().filter(char::is_ascii_digit).collect::<String>().parse() {
+                Ok(value) => (Value::Number { value }, 0.8, false),
+                Err(_) => (Value::Text { text: raw.clone() }, 0.2, false),
+            },
             Some("int") => match parse_int(&raw) {
                 Some(value) => (Value::Number { value }, 0.8, false),
                 None => (Value::Text { text: raw.clone() }, 0.2, false),

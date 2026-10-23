@@ -13,6 +13,7 @@
 //! publishes readings. Latest readings are read lock-free.
 
 pub mod config;
+pub mod detect;
 mod pipeline;
 #[cfg(windows)]
 mod runtime;
@@ -23,6 +24,7 @@ pub use pipeline::{Grid, Packs, Pipeline, font};
 pub use runtime::{MapleOcr, Options, Status, SubscriptionId};
 
 pub use mapleocr_layout::{AnchorTemplates, Calibration, Layout};
+pub use mapleocr_recog::glyph::Bitmap;
 pub use mapleocr_recog::{Atlas, Reading, Value};
 
 #[derive(Debug, thiserror::Error)]

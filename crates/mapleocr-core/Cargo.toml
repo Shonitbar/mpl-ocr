@@ -12,6 +12,7 @@ mapleocr-layout.workspace = true
 mapleocr-recog.workspace = true
 mapleocr-semantic.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 dirs.workspace = true
 thiserror.workspace = true

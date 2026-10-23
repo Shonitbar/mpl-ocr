@@ -68,7 +68,10 @@ pub type SubscriptionId = u64;
 type Callback = Arc<dyn Fn(&Reading) + Send + Sync>;
 
 struct Shared {
+    /// ROI names, then detector names.
     names: Vec<Arc<str>>,
+    /// How many of `names` are ROIs (the rest are detectors).
+    n_rois: usize,
     latest: Vec<ArcSwapOption<Reading>>,
     subs: Mutex<Vec<(SubscriptionId, Vec<usize>, Callback)>>,
     next_sub: AtomicU64,
@@ -120,7 +123,16 @@ enum Msg {
     /// New geometry; the worker needs it to crop and check window presence.
     Calibrated(Box<Calibration>),
     Job(Job),
+    /// A full client frame for the detectors.
+    Scout {
+        image: Box<BgraImage>,
+        frame_id: u64,
+        captured_at: i64,
+    },
 }
+
+/// How often the detectors get a full frame.
+const SCOUT_EVERY: Duration = Duration::from_millis(250);
 
 /// The running OCR framework. Dropping it stops capture and joins its threads.
 pub struct MapleOcr {
@@ -142,13 +154,18 @@ impl MapleOcr {
         let packs = Packs::load(&opts.data_dir)?;
         let atlas_dir = opts.data_dir.join("atlas");
         let pipeline = Pipeline::new(&opts.layout, opts.rois.as_deref(), packs, Some(&atlas_dir))?;
-        let names = pipeline.roi_names();
+        let detectors = crate::detect::Detectors::new(&opts.layout, opts.rois.as_deref(), &opts.data_dir)?;
+        let roi_names = pipeline.roi_names();
+        let n_rois = roi_names.len();
+        let names: Vec<Arc<str>> = roi_names.iter().chain(detectors.names()).cloned().collect();
+        let has_scout = !detectors.is_empty();
         let settle: Vec<(u32, Duration)> =
-            (0..names.len()).map(|i| (pipeline.settle_frames(i), pipeline.min_interval(i))).collect();
+            (0..n_rois).map(|i| (pipeline.settle_frames(i), pipeline.min_interval(i))).collect();
 
         let shared = Arc::new(Shared {
             latest: names.iter().map(|_| ArcSwapOption::empty()).collect(),
             names,
+            n_rois,
             subs: Mutex::new(Vec::new()),
             next_sub: AtomicU64::new(1),
             running: AtomicBool::new(true),
@@ -158,7 +175,10 @@ impl MapleOcr {
 
         let worker = {
             let shared = shared.clone();
-            std::thread::Builder::new().name("mapleocr-recog".into()).spawn(move || worker(shared, pipeline, rx))?
+            let anchors_dir = opts.data_dir.join("anchors");
+            std::thread::Builder::new()
+                .name("mapleocr-recog".into())
+                .spawn(move || worker(shared, pipeline, detectors, anchors_dir, rx))?
         };
 
         // WGC/D3D objects are not Send: open capture on its own thread and
@@ -181,7 +201,7 @@ impl MapleOcr {
                     s.backend = cap.backend_name();
                 });
                 let _ = opened_tx.send(Ok(()));
-                capture_loop(&shared, cap, &layout, &anchors_dir, &settle, &tx);
+                capture_loop(&shared, cap, &layout, &anchors_dir, &settle, has_scout, &tx);
             })?
         };
         let opened = opened_rx.recv().unwrap_or_else(|_| Err(Error::Config("capture thread died".into())));
@@ -303,10 +323,12 @@ struct SlotPlan {
     rects: Vec<Rect>,
     /// Per ROI: (strip slot index, presence check with offset inside the strip).
     presence: Vec<Option<(usize, Presence)>>,
+    /// Slot holding the full client frame for the detectors.
+    scout: Option<usize>,
 }
 
 impl SlotPlan {
-    fn new(calib: &Calibration, names: &[Arc<str>]) -> Self {
+    fn new(calib: &Calibration, names: &[Arc<str>], scout: bool) -> Self {
         let mut rects: Vec<Rect> = names.iter().map(|n| calib.rois[&**n]).collect();
         let presence = names
             .iter()
@@ -323,7 +345,11 @@ impl SlotPlan {
                 Some((rects.len() - 1, check))
             })
             .collect();
-        Self { rects, presence }
+        let scout = scout.then(|| {
+            rects.push(Rect::new(0, 0, calib.client_size.0, calib.client_size.1));
+            rects.len() - 1
+        });
+        Self { rects, presence, scout }
     }
 }
 
@@ -333,9 +359,11 @@ fn capture_loop(
     layout: &Layout,
     anchors_dir: &std::path::Path,
     settle: &[(u32, Duration)],
+    has_scout: bool,
     tx: &Sender<Msg>,
 ) {
-    let n = shared.names.len();
+    let n = shared.n_rois;
+    let mut last_scout: Option<std::time::Instant> = None;
     let mut calib: Option<Calibration> = None;
     let mut plan: Option<SlotPlan> = None;
     let mut states = vec![RoiState::default(); n];
@@ -348,7 +376,7 @@ fn capture_loop(
         if calib.is_none() {
             calib = calibrate_now(&mut cap, layout, anchors_dir, shared);
             let Some(c) = &calib else { continue };
-            let p = SlotPlan::new(c, &shared.names);
+            let p = SlotPlan::new(c, &shared.names[..n], has_scout);
             if tx.send(Msg::Calibrated(Box::new(c.clone()))).is_err() {
                 return;
             }
@@ -359,10 +387,18 @@ fn capture_loop(
             }
             // Optional windows start closed: only their strips are copied.
             active = (0..p.rects.len()).map(|i| i >= n || p.presence[i].is_none()).collect();
+            if let Some(k) = p.scout {
+                active[k] = true;
+            }
+            last_scout = None;
             states.fill(RoiState::default());
             plan = Some(p);
         }
         let (Some(c), Some(p)) = (&calib, &plan) else { continue };
+        if let Some(k) = p.scout {
+            // The full frame is copied only when a scout is due.
+            active[k] = last_scout.is_none_or(|t| t.elapsed() >= SCOUT_EVERY);
+        }
         cap.set_active(&active);
         let staged = active.clone();
         let frame = match cap.next_frame(WAIT) {
@@ -380,6 +416,19 @@ fn capture_loop(
         if c.client_size != frame.client_size {
             calib = None; // resized: recalibrate on the next frame
             continue;
+        }
+        if let Some(k) = p.scout
+            && staged[k]
+        {
+            last_scout = Some(std::time::Instant::now());
+            let msg = Msg::Scout {
+                image: Box::new(frame.rois[k].view().to_owned()),
+                frame_id: frame.frame_id,
+                captured_at: frame.acquired.0,
+            };
+            if tx.send(msg).is_err() {
+                return;
+            }
         }
         for i in 0..n {
             let st = &mut states[i];
@@ -451,12 +500,20 @@ fn capture_loop(
     }
 }
 
-fn worker(shared: Arc<Shared>, mut pipeline: Pipeline, rx: Receiver<Msg>) {
-    let mut cache: Vec<HashMap<u64, Reading>> = vec![HashMap::new(); shared.names.len()];
+fn worker(
+    shared: Arc<Shared>,
+    mut pipeline: Pipeline,
+    mut detectors: crate::detect::Detectors,
+    anchors_dir: std::path::PathBuf,
+    rx: Receiver<Msg>,
+) {
+    let n = shared.n_rois;
+    let mut cache: Vec<HashMap<u64, Reading>> = vec![HashMap::new(); n];
     let (mut jobs, mut hits) = (0u64, 0u64);
-    let mut pending: Vec<Option<Job>> = (0..shared.names.len()).map(|_| None).collect();
+    let mut pending: Vec<Option<Job>> = (0..n).map(|_| None).collect();
+    let mut scout: Option<(Box<BgraImage>, u64, i64)> = None;
     let mut calib: Option<Calibration> = None;
-    let mut recog = vec![(0.0f64, 0u64); shared.names.len()];
+    let mut recog = vec![(0.0f64, 0u64); n];
     while shared.running.load(Ordering::Acquire) {
         let first = match rx.recv_timeout(WAIT) {
             Ok(m) => m,
@@ -467,7 +524,10 @@ fn worker(shared: Arc<Shared>, mut pipeline: Pipeline, rx: Receiver<Msg>) {
         // invalidates queued jobs (their pixels use the old geometry).
         for m in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match m {
+                Msg::Scout { image, frame_id, captured_at } => scout = Some((image, frame_id, captured_at)),
                 Msg::Calibrated(c) => {
+                    scout = None;
+                    detectors.calibrate(&c, AnchorTemplates::load(&anchors_dir).ok().flatten().as_ref());
                     calib = Some(*c);
                     pending.iter_mut().for_each(|p| *p = None);
                     cache.iter_mut().for_each(HashMap::clear);
@@ -479,6 +539,11 @@ fn worker(shared: Arc<Shared>, mut pipeline: Pipeline, rx: Receiver<Msg>) {
             }
         }
         let Some(calib) = &calib else { continue };
+        if let Some((image, frame_id, captured_at)) = scout.take() {
+            for (di, reading) in detectors.run(image.view(), calib, frame_id, captured_at) {
+                shared.publish(n + di, reading);
+            }
+        }
         for i in 0..pending.len() {
             let Some(job) = pending[i].take() else { continue };
             jobs += 1;
