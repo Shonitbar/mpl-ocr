@@ -35,6 +35,12 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    /// Ink where the 0/255 image is above 127 (for color masks, where ink can
+    /// cover most of the crop and `binarize`'s sparse-ink assumption fails).
+    pub fn from_mask(g: &Gray) -> Bitmap {
+        Bitmap { w: g.width, h: g.height, bits: g.data.iter().map(|&v| v > 127.0).collect() }
+    }
+
     #[inline]
     fn at(&self, x: i32, y: i32) -> bool {
         x >= 0
@@ -235,7 +241,11 @@ impl Atlas {
     /// only as a distinct variant. Returns the number of glyphs added, or an
     /// error describing the mismatch.
     pub fn learn(&mut self, native: &Gray, text: &str) -> Result<usize, String> {
-        let bm = Bitmap::binarize(native);
+        self.learn_bitmap(Bitmap::binarize(native), text)
+    }
+
+    /// [`Atlas::learn`] from an already binarized image (e.g. a color mask).
+    pub fn learn_bitmap(&mut self, bm: Bitmap, text: &str) -> Result<usize, String> {
         let line = lines(&bm).into_iter().max_by_key(|&(a, b)| b - a).ok_or("no ink found")?;
         let segs = segments(&bm, line);
         let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -360,8 +370,15 @@ impl Atlas {
             }
             prev_x1 = Some(s.x1);
             let wide = s.x1 - s.x0 > self.max_w();
-            // Blobs much wider than a few letters are not text (world pixels, rules).
-            let too_wide = s.x1 - s.x0 > 4 * self.max_w();
+            // Blobs much wider than a few letters, or wide and solid (item
+            // icons), are not text: skip the expensive split.
+            let (sw, sh) = (s.x1 - s.x0, s.y1 - s.y0);
+            let ink = (s.y0..s.y1)
+                .flat_map(|y| (s.x0..s.x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| bm.at(x as i32, y as i32))
+                .count();
+            let solid = sw > 2 * self.max_w() && ink * 2 > (sw * sh) as usize;
+            let too_wide = sw > 4 * self.max_w() || solid;
             if sim >= self.accept || !wide || too_wide {
                 push_glyph(&mut text, best.filter(|_| sim >= self.accept));
                 sims.push(sim);

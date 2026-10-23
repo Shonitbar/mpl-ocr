@@ -82,6 +82,48 @@ pub enum Value {
     Empty,
     /// The ROI's window is not open.
     Hidden,
+    /// Item tooltips on screen (usually one; two when comparing equipment).
+    Tooltips {
+        items: Vec<Tooltip>,
+    },
+    /// A movable window: its position, text fields, and item slots.
+    Window {
+        rect: mapleocr_imgproc::Rect,
+        fields: std::collections::BTreeMap<String, Value>,
+        slots: Vec<Slot>,
+    },
+    /// Damage numbers that appeared since the previous report.
+    Damage {
+        hits: Vec<Hit>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Tooltip {
+    /// First line: the item name.
+    pub name: String,
+    /// The remaining readable lines (type, stats, description).
+    pub lines: Vec<String>,
+    pub rect: mapleocr_imgproc::Rect,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Slot {
+    /// Row-major index in the grid.
+    pub index: u32,
+    /// 64-bit perceptual hash of the icon, hex.
+    pub icon: String,
+    /// Name from the local icon database, if known.
+    pub name: Option<String>,
+    pub quantity: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Hit {
+    /// `None` if a digit is not in the damage atlas yet (see `text`).
+    pub value: Option<i64>,
+    pub text: String,
+    pub rect: mapleocr_imgproc::Rect,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

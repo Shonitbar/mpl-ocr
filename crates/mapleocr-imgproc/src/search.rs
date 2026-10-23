@@ -87,6 +87,55 @@ fn search_exhaustive(img: &Gray, tmpl: &Gray, area: Rect) -> Option<Match> {
     best
 }
 
+/// The `k` best non-overlapping matches (exhaustive; use on small images).
+pub fn ncc_peaks(img: &Gray, tmpl: &Gray, k: usize) -> Vec<Match> {
+    let (tw, th) = (tmpl.width as usize, tmpl.height as usize);
+    if tw == 0 || th == 0 || tw > img.width as usize || th > img.height as usize {
+        return Vec::new();
+    }
+    let n = (tw * th) as f64;
+    let tmean = tmpl.data.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let tz: Vec<f32> = tmpl.data.iter().map(|&v| (v as f64 - tmean) as f32).collect();
+    let tnorm = tz.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
+    if tnorm < 1e-6 {
+        return Vec::new();
+    }
+    let integral = Integral::new(img);
+    let iw = img.width as usize;
+    let (xs, ys) = (iw - tw + 1, img.height as usize - th + 1);
+    let mut scores = vec![f32::MIN; xs * ys];
+    for y in 0..ys {
+        for x in 0..xs {
+            let (s1, s2) = integral.window(x, y, tw, th);
+            let var = s2 - s1 * s1 / n;
+            if var < 1e-6 {
+                continue;
+            }
+            let mut num = 0.0f32;
+            for ty in 0..th {
+                let row = &img.data[(y + ty) * iw + x..][..tw];
+                num += row.iter().zip(&tz[ty * tw..(ty + 1) * tw]).map(|(a, b)| a * b).sum::<f32>();
+            }
+            scores[y * xs + x] = (num as f64 / (var.sqrt() * tnorm)) as f32;
+        }
+    }
+    let mut out: Vec<Match> = Vec::new();
+    for _ in 0..k {
+        let Some((i, &s)) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else { break };
+        if s <= 0.0 {
+            break;
+        }
+        let (x, y) = ((i % xs) as i32, (i / xs) as i32);
+        out.push(Match { x, y, score: s });
+        for yy in (y - th as i32).max(0)..(y + th as i32).min(ys as i32) {
+            for xx in (x - tw as i32).max(0)..(x + tw as i32).min(xs as i32) {
+                scores[yy as usize * xs + xx as usize] = f32::MIN;
+            }
+        }
+    }
+    out
+}
+
 /// Find `tmpl` in `img` with its top-left inside `area`. Searches a 4x
 /// downscaled pyramid level first when the area is large, then refines at
 /// full resolution around the coarse hit.

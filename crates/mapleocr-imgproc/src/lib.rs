@@ -11,7 +11,7 @@ mod search;
 pub use gray::Gray;
 pub use io::{ImageError, load_png, save_png};
 pub use native::{best_phase, to_native, to_native_aligned, to_native_phase};
-pub use search::{Match, ncc_search};
+pub use search::{Match, ncc_peaks, ncc_search};
 
 /// Axis-aligned rectangle in pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
