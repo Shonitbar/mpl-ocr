@@ -194,6 +194,27 @@ pub fn watch(a: WatchArgs) -> Result<()> {
 }
 
 #[derive(Args)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// ROIs to serve (default: all).
+    rois: Vec<String>,
+    /// Port on 127.0.0.1.
+    #[arg(long, default_value_t = 8765)]
+    port: u16,
+    /// Also accept browser requests from this origin, e.g. https://myapp.example (repeatable).
+    #[arg(long = "allow-origin")]
+    allow_origins: Vec<String>,
+}
+
+/// Serve readings over HTTP + WebSocket until Ctrl+C.
+pub fn serve(a: ServeArgs) -> Result<()> {
+    let ocr = std::sync::Arc::new(start(&a.target, &a.rois)?);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], a.port));
+    mapleocr_server::run_blocking(ocr, addr, a.allow_origins)
+}
+
+#[derive(Args)]
 pub struct ReadArgs {
     #[command(flatten)]
     target: TargetArgs,
@@ -216,6 +237,71 @@ pub fn read(a: ReadArgs) -> Result<()> {
     let err = ocr.status().last_error.clone();
     ocr.stop();
     bail!("no reading for {} within {} s{}", a.roi, a.timeout_s, err.map(|e| format!(" ({e})")).unwrap_or_default())
+}
+
+#[derive(Subcommand)]
+pub enum WindowCmd {
+    /// Learn a movable window's title template from a saved frame where it is open.
+    Learn {
+        /// Template name from the layout (e.g. item_inventory_title).
+        template: String,
+        #[arg(long)]
+        image: PathBuf,
+        /// Title strip as x,y,w,h in client pixels of that frame.
+        #[arg(long)]
+        rect: crate::NamedRoi,
+    },
+    /// Save the icon of each inventory slot as a labeled entry in your icon database.
+    NameIcon {
+        /// Detector name (e.g. item_inventory).
+        detector: String,
+        #[arg(long)]
+        image: PathBuf,
+        /// Slot index (row-major) and the item name, e.g. --slot 3=Leaf
+        #[arg(long = "slot", value_parser = parse_slot)]
+        slots: Vec<(u32, String)>,
+    },
+}
+
+fn parse_slot(s: &str) -> Result<(u32, String), String> {
+    let (i, n) = s.split_once('=').ok_or("expected index=name")?;
+    Ok((i.parse().map_err(|e: std::num::ParseIntError| e.to_string())?, n.to_owned()))
+}
+
+pub fn window(c: WindowCmd) -> Result<()> {
+    let dir = data_dir()?;
+    match c {
+        WindowCmd::Learn { template, image, rect } => {
+            let frame = mapleocr_imgproc::load_png(&image)?;
+            let t = AnchorTemplates::learn_rect(&dir.join("anchors"), &layout()?, &template, frame.view(), rect.rect)?;
+            println!("learned {template} ({} templates)", t.images.len());
+        }
+        WindowCmd::NameIcon { detector, image, slots } => {
+            let frame = mapleocr_imgproc::load_png(&image)?;
+            let layout = layout()?;
+            let templates = AnchorTemplates::load(&dir.join("anchors"))?.context("no templates learned yet")?;
+            let Some(mapleocr_layout::DetectorSpec::Window { template, .. }) = layout.detectors.get(&detector) else {
+                bail!("{detector} is not a window detector");
+            };
+            let calib = calibrate(&layout, frame.view(), Some(&templates));
+            let t = templates.scaled(template, calib.scale).context("template not learned")?;
+            let title =
+                mapleocr_core::detect::find_window_once(frame.view(), &t).context("window not found in that frame")?;
+            let mut db = mapleocr_core::detect::IconDb::load(&dir)?;
+            for (i, name) in slots {
+                let r =
+                    mapleocr_core::detect::slot_rect(&layout, &detector, title, calib.scale, i).context("no grid")?;
+                let icon = frame.view().crop(mapleocr_imgproc::Rect::new(r.x, r.y, r.w, r.h * 13 / 20));
+                let hash = mapleocr_core::detect::icon_hash(icon);
+                db.icons.retain(|e| e.hash != hash);
+                db.icons.push(mapleocr_core::detect::IconEntry { hash: hash.clone(), name: name.clone() });
+                println!("slot {i}: {name} = {hash}");
+            }
+            db.schema = mapleocr_core::detect::ICON_SCHEMA.into();
+            db.save(&dir)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]

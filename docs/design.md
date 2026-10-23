@@ -238,17 +238,39 @@ Latency comes first, so the yield window stays. Remaining cost is mostly chat
 OCR (~14 ms per read, ≤ 3.3 Hz). The 10%-of-a-core target is slightly exceeded
 with every ROI on.
 
-### Next
-- **Tooltips**: they follow the cursor, so they need a detector. Plan:
-  border/background color search on a downscaled frame (GPU mip), then glyph
-  reading inside with GDI Arial 12 (tooltip text was identified as Arial 12).
-- **Movable windows** (inventory, equipment, stats, skills, quest log):
-  title-bar templates searched at low rate on the downscaled frame, then
-  window-relative ROIs. Inventory slots use the icon matcher.
-- **Damage numbers**: sprite matcher with color classes and tracking.
-- **Quest helper bold on dark scenery**: learn the bold glyphs from captures
-  (`learned:`) instead of GDI, or key on the panel tint.
-- **Chat**: glyph tier per chat color instead of OCR (lower CPU, higher accuracy).
+### Detectors: UI without a fixed position
+A low-rate "scout" (every 250 ms) copies the full client frame and runs the
+detectors on it; fixed ROIs never wait for it.
+
+- **Tooltips**: the translucent navy fill has a consistent color
+  (R,G ~70-85, B ~113-135) over any background. Match it on the 1/4 frame,
+  dilate 3 cells to bridge text and icons, keep components with at least 500
+  navy cells. A border-based detector failed because the bevel changes with the
+  background, and a loose color test matched blue sky. Text goes to Windows OCR
+  (the glyph reader cannot split lines that share rows with the icon). Item
+  names read correctly on 3 of 3 frames with tooltips; the second tooltip of a
+  comparison pair is sometimes merged into the first.
+- **Windows** (`kind: window`): a learned title template. The 1/4-frame search
+  returns the 6 best candidates (a thin title strip alone matches the wrong
+  place), each verified at full resolution. Re-checked at its last position
+  every scout. Found on 4 of 4 frames with the inventory open, hidden on the
+  rest. Slots are a grid relative to the title; each non-empty slot gets a
+  4x4x RGB color descriptor (48 hex digits) matched by L1 distance against your
+  local icon database (`mapleocr window name-icon`). 22 of 22 icons in one
+  inventory had distinct descriptors; a gradient hash gave 4 identical ones.
+- **Damage numbers** (beta): orange-mask blobs, matched against a
+  `learned:damage_digits` atlas; blobs whose shapes are not digits are dropped.
+  Taught from two frames, it read "6?" for "66": touching digits and orange
+  scenery still need work. Not yet reliable.
+
+Known gaps: mesos (OCR reads only the first digit group), item quantities in
+slots (need a taught `slot_digits` atlas), quest helper bold titles over dark
+scenery, equipment/stat/skill windows (same `window` detector, not yet configured).
+
+## Server
+
+`mapleocr serve` (crate `mapleocr-server`, axum): REST + WebSocket + dashboard,
+loopback only, Origin-checked. Spec in [protocol.md](protocol.md).
 
 ## Font identification (M0)
 

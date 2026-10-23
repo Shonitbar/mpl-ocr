@@ -10,10 +10,13 @@ tooltips, chat, and more. Screen pixels in, structured readings out.
 > [DISCLAIMER.md](DISCLAIMER.md).
 
 **Status: prototype.** Readable today: map name, level, job, character name,
-HP, MP, EXP, NPC dialogue (name, text, options), quest helper (beta), chat
-(beta), plus an opt-in whole-screen text scan. Tooltips, inventory and other
-movable windows are next. See [docs/design.md](docs/design.md) for the
-catalogue and measurements.
+HP, MP, EXP, NPC dialogue, item tooltips (name + text), the item inventory
+window (item icons, optionally named by you), quest helper (beta), chat (beta),
+damage numbers (beta, needs teaching), and an opt-in whole-screen text scan.
+Other movable windows (equipment, stats, skills) reuse the same window
+detector and are next. Use it from Rust, or from any language or web UI via
+the local server (`mapleocr serve`, see [docs/protocol.md](docs/protocol.md)).
+Catalogue and measurements: [docs/design.md](docs/design.md).
 
 ## Build
 
@@ -55,6 +58,11 @@ mapleocr calibrate --learn-anchor npc_dialogue --image fixtures/local/<session>/
 mapleocr watch
 mapleocr watch screen
 
+# Movable windows and detectors: teach the inventory title once, then name icons
+mapleocr window learn item_inventory_title --image <frame.png> --rect title=815,186,320,26
+mapleocr window name-icon item_inventory --image <frame.png> --slot 3=Leaf
+mapleocr watch tooltip item_inventory
+
 # 3. Record samples: press F9 in game to save a frame, Ctrl+C to stop
 mapleocr capture-dataset --label "inventory open"
 
@@ -71,6 +79,20 @@ Identify the UI font from labeled crops (Python tooling in `tools/`):
 python -m venv tools/.venv && tools/.venv/Scripts/pip install -e "tools[dev]"
 tools/.venv/Scripts/python -m mapleocr_tools.identify_font fixtures/local/font-samples.json
 ```
+
+## Use it from any language or a web UI
+
+```sh
+mapleocr serve                  # http://127.0.0.1:8765 : dashboard, REST, WebSocket
+```
+
+- `GET /v1/readings`, `GET /v1/read/hp`, `GET /v1/status`
+- `ws://127.0.0.1:8765/v1/stream`: live JSON events with subscribe/unsubscribe
+
+Examples: [Python](examples/python/client.py) and
+[TypeScript](examples/web/client.ts). The server is loopback-only and rejects
+browser origins you have not allowed (`--allow-origin`). Full spec:
+[docs/protocol.md](docs/protocol.md).
 
 ## Use it from Rust
 

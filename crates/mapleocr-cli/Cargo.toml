@@ -16,6 +16,7 @@ mapleocr-core.workspace = true
 mapleocr-imgproc.workspace = true
 mapleocr-layout.workspace = true
 mapleocr-semantic.workspace = true
+mapleocr-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

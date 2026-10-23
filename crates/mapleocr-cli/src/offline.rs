@@ -36,7 +36,8 @@ impl EngineArgs {
         let only = (!self.rois.is_empty()).then_some(self.rois.as_slice());
         let pipeline = Pipeline::new(&layout, only, Packs::load(&dir)?, Some(&dir.join("atlas")))?;
         let templates = AnchorTemplates::load(&dir.join("anchors"))?;
-        Ok(Offline { debug: false, layout, pipeline, templates })
+        let detectors = mapleocr_core::detect::Detectors::new(&layout, only, &dir)?;
+        Ok(Offline { debug: false, layout, pipeline, templates, detectors })
     }
 }
 
@@ -45,6 +46,7 @@ struct Offline {
     layout: Layout,
     pipeline: Pipeline,
     templates: Option<AnchorTemplates>,
+    detectors: mapleocr_core::detect::Detectors,
 }
 
 impl Offline {
@@ -70,6 +72,9 @@ impl Offline {
             }
             out.push(self.pipeline.recognize_in(i, &calib, capture, 0, 0)?);
         }
+        // Detectors see the whole frame, like a live scout capture.
+        self.detectors.calibrate(&calib, self.templates.as_ref());
+        out.extend(self.detectors.run(img.view(), &calib, 0, 0).into_iter().map(|(_, r)| r));
         Ok((calib, out))
     }
 }
@@ -85,6 +90,25 @@ pub fn describe(v: &Value) -> String {
         Value::Exp { value, percent } => format!("{value} ({percent:.2}%)"),
         Value::Dialogue { text, options } if options.is_empty() => text.clone(),
         Value::Dialogue { text, options } => format!("{text} || {}", options.join(" | ")),
+        Value::Tooltips { items } => {
+            items.iter().map(|t| format!("[{}] {}", t.name, t.lines.join(" | "))).collect::<Vec<_>>().join(" || ")
+        }
+        Value::Window { fields, slots, .. } => {
+            let f: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={}", describe(v))).collect();
+            let s: Vec<String> = slots
+                .iter()
+                .map(|s| {
+                    format!(
+                        "#{}:{}x{}",
+                        s.index,
+                        s.name.as_deref().unwrap_or(&s.icon[..6]),
+                        s.quantity.map_or("?".into(), |q| q.to_string())
+                    )
+                })
+                .collect();
+            format!("{} | {} slots: {}", f.join(" "), s.len(), s.join(" "))
+        }
+        Value::Damage { hits } => hits.iter().map(|h| h.text.clone()).collect::<Vec<_>>().join(", "),
         Value::Empty => "(empty)".into(),
         Value::Hidden => "(hidden)".into(),
     }
@@ -258,10 +282,33 @@ pub fn bench_fixtures(a: FixtureBenchArgs) -> Result<()> {
     Ok(())
 }
 
+fn parse_point(s: &str) -> Result<(i32, i32), String> {
+    let (x, y) = s.split_once(',').ok_or("expected x,y")?;
+    Ok((
+        x.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?,
+        y.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?,
+    ))
+}
+
 #[derive(clap::Subcommand)]
 pub enum AtlasCmd {
     /// Teach a `learned:<name>` glyph atlas from one labeled ROI of a saved frame.
     Learn(LearnArgs),
+    /// Teach the damage-number digit sprites from a frame where exactly one
+    /// damage number is on screen.
+    LearnDamage {
+        #[arg(long)]
+        image: PathBuf,
+        /// The digits shown, e.g. 66.
+        #[arg(long)]
+        text: String,
+        /// Only list the candidates found, do not learn.
+        #[arg(long)]
+        list: bool,
+        /// Pick the candidate nearest this point (x,y) when several are found.
+        #[arg(long, value_parser = parse_point)]
+        at: Option<(i32, i32)>,
+    },
     /// Print a font's glyphs: a learned atlas name or any spec (gdi:Arial:11:bold).
     Show {
         name: String,
@@ -332,6 +379,38 @@ pub fn atlas(cmd: AtlasCmd) -> Result<()> {
             atlas.save(&path)?;
             let chars: String = atlas.glyphs.iter().filter(|g| g.ch2.is_none()).map(|g| g.ch).collect();
             println!("{name}: +{added} glyphs, now {} ({chars}) -> {}", atlas.glyphs.len(), path.display());
+        }
+        AtlasCmd::LearnDamage { image, text, list, at } => {
+            let img = load_png(&image).with_context(|| format!("loading {}", image.display()))?;
+            let layout = Layout::builtin();
+            let calib = calibrate(&layout, img.view(), None);
+            let found = mapleocr_core::detect::find_damage(img.view(), &[], calib.scale);
+            for r in &found {
+                println!("candidate at {},{} {}x{}", r.x, r.y, r.w, r.h);
+            }
+            if list {
+                return Ok(());
+            }
+            let r = match (found.as_slice(), at) {
+                ([r], _) => r,
+                (_, Some((x, y))) => found
+                    .iter()
+                    .min_by_key(|r| (r.x + r.w as i32 / 2 - x).abs() + (r.y + r.h as i32 / 2 - y).abs())
+                    .context("no candidates")?,
+                _ => bail!("found {} candidates; pass --at x,y to pick one (see --list)", found.len()),
+            };
+            let ink = mapleocr_core::detect::damage_ink(img.view(), *r);
+            let path = dir.join("damage_digits.json");
+            let mut atlas = if path.exists() {
+                mapleocr_core::Atlas::load(&path)?
+            } else {
+                mapleocr_core::Atlas::new("damage_digits", 0)
+            };
+            let added = atlas
+                .learn_bitmap(mapleocr_core::Bitmap::from_mask(&ink), &text)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            atlas.save(&path)?;
+            println!("damage_digits: +{added} glyphs -> {}", path.display());
         }
         AtlasCmd::Show { name, chars } => {
             let spec = if name.contains(':') { name.clone() } else { format!("learned:{name}") };

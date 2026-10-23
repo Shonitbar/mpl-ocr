@@ -32,8 +32,13 @@ enum Cmd {
     Calibrate(live::CalibrateArgs),
     /// Print readings live as they change.
     Watch(live::WatchArgs),
+    /// Serve live readings over HTTP + WebSocket (with a built-in dashboard).
+    Serve(live::ServeArgs),
     /// Print one reading as JSON and exit.
     Read(live::ReadArgs),
+    /// Teach movable windows (inventory ...) and name item icons.
+    #[command(subcommand)]
+    Window(live::WindowCmd),
     /// Manage your local data packs.
     #[command(subcommand)]
     Pack(live::PackCmd),
@@ -161,7 +166,9 @@ fn main() -> Result<()> {
         Cmd::Calibrate(a) => live::calibrate_cmd(a),
         Cmd::Watch(a) => live::watch(a),
         Cmd::Read(a) => live::read(a),
+        Cmd::Serve(a) => live::serve(a),
         Cmd::Pack(c) => live::pack(c),
+        Cmd::Window(c) => live::window(c),
         Cmd::Atlas(c) => offline::atlas(c),
         Cmd::Recognize(a) => offline::recognize(a),
         Cmd::Bench(c) => bench::run(c),
