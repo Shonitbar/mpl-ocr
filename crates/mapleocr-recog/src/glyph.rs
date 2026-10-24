@@ -36,6 +36,50 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    /// Binarize line by line: rows with any pixel at or above `coarse` form bands
+    /// (separated by empty rows), and each band is thresholded halfway between its
+    /// own median and its own 98th percentile. Dim text showing through a
+    /// translucent panel loses to the real text in the same band.
+    pub fn binarize_banded(g: &Gray, coarse: f32) -> Bitmap {
+        let (w, h) = (g.width as usize, g.height as usize);
+        let mut bits = vec![false; w * h];
+        let row_has = |y: usize| g.data[y * w..(y + 1) * w].iter().any(|&v| v >= coarse);
+        let mut y = 0;
+        while y < h {
+            if !row_has(y) {
+                y += 1;
+                continue;
+            }
+            let start = y;
+            while y < h && row_has(y) {
+                y += 1;
+            }
+            // One row of margin: anti-aliased tops and descenders.
+            let (y0, y1) = (start.saturating_sub(1), (y + 1).min(h));
+            let mut band: Vec<f32> = g.data[y0 * w..y1 * w].to_vec();
+            band.sort_by(f32::total_cmp);
+            let bg = band[band.len() / 2];
+            let ink = band[((band.len() - 1) as f32 * 0.98) as usize];
+            // Text proper is pure white; dimmer bands are things showing through.
+            if ink - bg < 40.0 || ink < 225.0 {
+                continue;
+            }
+            let thr = (bg + ink) / 2.0;
+            for yy in y0..y1 {
+                for x in 0..w {
+                    bits[yy * w + x] = g.data[yy * w + x] > thr;
+                }
+            }
+        }
+        Bitmap { w: g.width, h: g.height, bits }
+    }
+
+    /// Ink where the image is at or above `thr` (a fixed level, unlike [`Bitmap::binarize`]:
+    /// rejects dim text showing through translucent panels).
+    pub fn from_threshold(g: &Gray, thr: f32) -> Bitmap {
+        Bitmap { w: g.width, h: g.height, bits: g.data.iter().map(|&v| v >= thr).collect() }
+    }
+
     /// Ink where the 0/255 image is above 127 (for color masks, where ink can
     /// cover most of the crop and `binarize`'s sparse-ink assumption fails).
     pub fn from_mask(g: &Gray) -> Bitmap {
@@ -140,6 +184,52 @@ pub struct Glyph {
     pub bitmap: Bitmap,
     /// Bottom ink row relative to the baseline row (0 sits on it, >0 descends).
     pub drop: i32,
+    /// Rows as bit masks (bit x+1 = pixel x), for popcount IoU. None if wider than 60 px.
+    packed: Option<Vec<u64>>,
+}
+
+impl Glyph {
+    pub fn new(ch: char, ch2: Option<char>, bitmap: Bitmap, drop: i32) -> Self {
+        let packed = pack(&bitmap);
+        Self { ch, ch2, bitmap, drop, packed }
+    }
+}
+
+/// Pack rows into `u64` masks with one padding bit on the left (so a 1 px shift left
+/// stays inside the word). `None` if the bitmap is too wide.
+fn pack(b: &Bitmap) -> Option<Vec<u64>> {
+    if b.w > 60 {
+        return None;
+    }
+    Some(
+        (0..b.h)
+            .map(|y| (0..b.w).fold(0u64, |row, x| row | (u64::from(b.bits[(y * b.w + x) as usize]) << (x + 1))))
+            .collect(),
+    )
+}
+
+/// Best IoU of `b` shifted by up to 1 px in each direction against `a` (packed rows),
+/// with the same small penalty for shifting as [`iou_shifted`].
+fn iou_shifted_packed(a: &[u64], b: &[u64]) -> f32 {
+    let (ah, bh) = (a.len() as i32, b.len() as i32);
+    let mut best = 0.0f32;
+    for dy in -1..=1i32 {
+        for dx in -1..=1i32 {
+            let (mut inter, mut union) = (0u32, 0u32);
+            for y in dy.min(0)..ah.max(bh + dy) {
+                let ar = if (0..ah).contains(&y) { a[y as usize] } else { 0 };
+                let by = y - dy;
+                let br0 = if (0..bh).contains(&by) { b[by as usize] } else { 0 };
+                let br = if dx >= 0 { br0 << dx } else { br0 >> -dx };
+                inter += (ar & br).count_ones();
+                union += (ar | br).count_ones();
+            }
+            let pen = if dx == 0 && dy == 0 { 0.0 } else { 0.02 };
+            let iou = if union == 0 { 0.0 } else { inter as f32 / union as f32 };
+            best = best.max(iou - pen);
+        }
+    }
+    best
 }
 
 /// A set of glyphs for one font or sprite set.
@@ -176,6 +266,16 @@ struct GlyphFile {
     rows: Vec<String>,
 }
 
+/// A line read from a binarized image, with where it was and how well it matched.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoredLine {
+    pub text: String,
+    pub quality: f32,
+    /// Row range and column range (native pixels of the input).
+    pub rows: (u32, u32),
+    pub x: (u32, u32),
+}
+
 pub const ATLAS_SCHEMA: &str = "mapleocr.atlas/1";
 
 impl Atlas {
@@ -196,7 +296,7 @@ impl Atlas {
                 let h = g.rows.len() as u32;
                 let w = g.rows.first().map_or(0, |r| r.chars().count() as u32);
                 let bits = g.rows.iter().flat_map(|r| r.chars().map(|c| c == '#')).collect();
-                Glyph { ch: g.ch, ch2: g.ch2, drop: g.drop, bitmap: Bitmap { w, h, bits } }
+                Glyph::new(g.ch, g.ch2, Bitmap { w, h, bits }, g.drop)
             })
             .collect();
         // Scale-normalized sprites vary more between instances than fixed-size
@@ -307,10 +407,30 @@ impl Atlas {
             {
                 continue;
             }
-            self.glyphs.push(Glyph { ch, ch2: None, bitmap, drop: s.y1 as i32 - 1 - baseline });
+            self.glyphs.push(Glyph::new(ch, None, bitmap, s.y1 as i32 - 1 - baseline));
             added += 1;
         }
         Ok(added)
+    }
+
+    /// Every text-looking line of a binarized image with a quality score, for choosing
+    /// between readings of the same pixels under different binarizations.
+    pub fn read_scored(&self, mut bm: Bitmap) -> Vec<ScoredLine> {
+        bm.erase_dashed_rules();
+        let mut out = Vec::new();
+        for line in lines(&bm) {
+            let (text, _, quality) = self.read_line(&bm, line);
+            let shown = text.chars().filter(|c| !c.is_whitespace()).count();
+            let unknown = text.chars().filter(|&c| c == '?').count();
+            let alnum = text.chars().filter(|c| c.is_alphanumeric()).count();
+            if shown == 0 || unknown * 2 > shown || alnum * 2 < shown {
+                continue;
+            }
+            let segs = segments(&bm, line);
+            let (x0, x1) = (segs.first().map_or(0, |s| s.x0), segs.last().map_or(0, |s| s.x1));
+            out.push(ScoredLine { text, quality, rows: line, x: (x0, x1) });
+        }
+        out
     }
 
     /// Classify one isolated glyph bitmap (e.g. one connected digit blob).
@@ -333,7 +453,7 @@ impl Atlas {
         if !known.is_empty() && !known.iter().any(|g| g.bitmap.w.abs_diff(bitmap.w) <= 3) {
             return false;
         }
-        self.glyphs.push(Glyph { ch, ch2: None, bitmap, drop: 0 });
+        self.glyphs.push(Glyph::new(ch, None, bitmap, 0));
         true
     }
 
@@ -348,7 +468,7 @@ impl Atlas {
         let (mut out, mut boxes) = (Vec::new(), Vec::new());
         let mut worst = 1.0f32;
         for line in lines(&bm) {
-            let (text, conf) = self.read_line(&bm, line);
+            let (text, conf, _) = self.read_line(&bm, line);
             // Mostly-unknown lines are icons, borders or world pixels, not text.
             // Lines of mostly punctuation are underlines and specks.
             let shown = text.chars().filter(|c| !c.is_whitespace()).count();
@@ -366,7 +486,7 @@ impl Atlas {
         Recognition { confidence: Some(if out.is_empty() { 1.0 } else { worst }), lines: out, boxes }
     }
 
-    fn read_line(&self, bm: &Bitmap, line: (u32, u32)) -> (String, f32) {
+    fn read_line(&self, bm: &Bitmap, line: (u32, u32)) -> (String, f32, f32) {
         let segs = segments(bm, line);
         let base = baseline(&segs);
         let mut text = String::new();
@@ -415,8 +535,9 @@ impl Atlas {
                 .filter(|&(x, y)| bm.at(x as i32, y as i32))
                 .count();
             let solid = sw > 2 * self.max_w() && ink * 2 > (sw * sh) as usize;
-            let too_wide = sw > 4 * self.max_w() || solid;
-            if sim >= self.accept || !wide || too_wide {
+            // Touching letters come in runs of two or three; wider blobs are not text.
+            let too_wide = sw > 3 * self.max_w() || solid;
+            if sim >= self.accept || !wide || too_wide || sim < 0.35 {
                 push_glyph(&mut text, best.filter(|_| sim >= self.accept));
                 sims.push(sim);
             } else {
@@ -427,7 +548,10 @@ impl Atlas {
             }
         }
         let conf = sims.iter().copied().fold(1.0f32, f32::min);
-        (text, conf)
+        // Known glyphs add their similarity, unknown ones cost a full point: longer correct
+        // lines outscore truncated or garbled readings of the same row.
+        let quality = sims.iter().map(|&s| if s >= self.accept { s } else { -1.0 }).sum();
+        (text, conf, quality)
     }
 
     /// Best glyph for a tight segment bitmap.
@@ -435,13 +559,17 @@ impl Atlas {
         let mut best = (None, 0.0f32);
         let scaled = self.norm_height.map(|h| scale_to_height(seg, h));
         let seg = scaled.as_ref().unwrap_or(seg);
+        let seg_packed = pack(seg);
         let tol = if self.norm_height.is_some() { 2 } else { 1 };
         for g in &self.glyphs {
             let gb = &g.bitmap;
             if gb.w.abs_diff(seg.w) > tol || gb.h.abs_diff(seg.h) > tol {
                 continue;
             }
-            let mut sim = iou_shifted(gb, seg);
+            let mut sim = match (&g.packed, &seg_packed) {
+                (Some(gp), Some(sp)) => iou_shifted_packed(gp, sp),
+                _ => iou_shifted(gb, seg),
+            };
             if self.norm_height.is_none() && (g.drop - drop).abs() > 1 {
                 sim -= 0.25;
             }
@@ -735,7 +863,7 @@ mod gdi {
                 };
                 for ch in CHARS.chars() {
                     if let Some((bitmap, drop, _)) = render(&ch.to_string()) {
-                        atlas.glyphs.push(Glyph { ch, ch2: None, bitmap, drop });
+                        atlas.glyphs.push(Glyph::new(ch, None, bitmap, drop));
                     }
                 }
                 // Letter pairs GDI draws touching ("ft", "tt", "rv"): segmentation
@@ -743,7 +871,7 @@ mod gdi {
                 for a in PAIR_CHARS.chars() {
                     for b in PAIR_CHARS.chars() {
                         if let Some((bitmap, drop, true)) = render(&format!("{a}{b}")) {
-                            atlas.glyphs.push(Glyph { ch: a, ch2: Some(b), bitmap, drop });
+                            atlas.glyphs.push(Glyph::new(a, Some(b), bitmap, drop));
                         }
                     }
                 }
@@ -844,5 +972,34 @@ mod rule_tests {
         let mut d = digits.clone();
         d.erase_dashed_rules();
         assert_eq!(d, digits);
+    }
+}
+
+#[cfg(test)]
+mod packed_tests {
+    use super::*;
+
+    fn bm(rows: &[&str]) -> Bitmap {
+        Bitmap {
+            w: rows[0].len() as u32,
+            h: rows.len() as u32,
+            bits: rows.iter().flat_map(|r| r.chars().map(|c| c == '#')).collect(),
+        }
+    }
+
+    #[test]
+    fn packed_iou_matches_the_slow_one() {
+        let a = bm(&["..##.", ".#..#", ".####", ".#..#", ".#..#"]);
+        let cases = [
+            bm(&["..##.", ".#..#", ".####", ".#..#", ".#..#"]),
+            bm(&[".##..", "#..#.", "####.", "#..#.", "#..#."]),
+            bm(&["###", "#.#", "###", "#.#"]),
+            bm(&["#####", "#...#", "#...#", "#####", "....."]),
+        ];
+        for b in &cases {
+            let (pa, pb) = (pack(&a).unwrap(), pack(b).unwrap());
+            let (fast, slow) = (iou_shifted_packed(&pa, &pb), iou_shifted(&a, b));
+            assert!((fast - slow).abs() < 1e-6, "fast {fast} slow {slow}");
+        }
     }
 }

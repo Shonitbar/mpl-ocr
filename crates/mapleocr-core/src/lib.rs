@@ -17,6 +17,7 @@ pub mod detect;
 mod pipeline;
 #[cfg(windows)]
 mod runtime;
+pub mod tooltip;
 
 pub use config::{Config, data_dir};
 pub use pipeline::{Grid, Packs, Pipeline, font};

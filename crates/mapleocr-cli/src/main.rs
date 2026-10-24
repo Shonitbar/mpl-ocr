@@ -36,6 +36,8 @@ enum Cmd {
     Serve(live::ServeArgs),
     /// Print one reading as JSON and exit.
     Read(live::ReadArgs),
+    /// Developer tool: locate and dump tooltips in a saved frame.
+    Tooltip(live::TooltipArgs),
     /// Teach movable windows (inventory ...) and name item icons.
     #[command(subcommand)]
     Window(live::WindowCmd),
@@ -169,6 +171,7 @@ fn main() -> Result<()> {
         Cmd::Serve(a) => live::serve(a),
         Cmd::Pack(c) => live::pack(c),
         Cmd::Window(c) => live::window(c),
+        Cmd::Tooltip(a) => live::tooltip_cmd(a),
         Cmd::Atlas(c) => offline::atlas(c),
         Cmd::Recognize(a) => offline::recognize(a),
         Cmd::Bench(c) => bench::run(c),

@@ -130,7 +130,7 @@ rois:
 detectors:
   tooltip:                  # item tooltips (translucent navy boxes)
     kind: tooltip
-    font: gdi:Arial:12+gdi:Arial:12:bold
+    font: gdi:Arial:12+gdi:Arial:12:bold+gdi:Arial:14:bold+gdi:Arial:13:bold
   item_inventory:           # learn the title once: mapleocr window learn item_inventory_title ...
     kind: window
     template: item_inventory_title

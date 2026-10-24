@@ -116,6 +116,7 @@ enum Kind {
     /// Tooltip text is laid out around an icon and stat columns, which a line-based
     /// glyph read cannot separate, so detected boxes go to the OCR engine.
     Tooltip {
+        atlas: Option<Arc<Atlas>>,
         ocr: Option<mapleocr_recog::WinOcr>,
     },
     Window(Box<WindowState>),
@@ -129,6 +130,7 @@ pub struct Detectors {
     names: Vec<Arc<str>>,
     kinds: Vec<Kind>,
     icons: IconDb,
+    tooltip_cache: crate::tooltip::Cache,
 }
 
 /// Mean color of 4x4 blocks: a 1/4-size RGB image (as three planes).
@@ -213,62 +215,6 @@ fn components(mask: &[bool], w: u32, h: u32) -> Vec<(Rect, u32)> {
         out.push((Rect::new(x0 as i32, y0 as i32, x1 - x0 + 1, y1 - y0 + 1), n));
     }
     out
-}
-
-fn overlap(a: Rect, b: Rect) -> u32 {
-    let x0 = a.x.max(b.x);
-    let y0 = a.y.max(b.y);
-    let x1 = a.right().min(b.right());
-    let y1 = a.bottom().min(b.bottom());
-    ((x1 - x0).max(0) * (y1 - y0).max(0)) as u32
-}
-
-/// Tooltip boxes: the translucent navy fill has a consistent color
-/// (R,G ~ 70-85, B ~ 113-135) over any background. On the 1/4 frame, match that
-/// color, dilate to bridge text and icons, and keep big components. The
-/// 1/4-scale box is approximate; text reading tolerates the slack.
-pub fn find_tooltips(small: &SmallFrame, exclude: &[Rect]) -> Vec<Rect> {
-    let s = &small.0;
-    let mask: Vec<bool> = s
-        .rgb
-        .iter()
-        .map(|&[r, g, b]| {
-            r > 50.0 && r < 105.0 && g > 50.0 && g < 105.0 && b > 95.0 && b < 150.0 && b - r >= 25.0 && b - g >= 20.0
-        })
-        .collect();
-    let (w, h) = (s.w as usize, s.h as usize);
-    let mut d = mask.clone();
-    for _ in 0..3 {
-        let prev = d.clone();
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                d[i] = prev[i]
-                    || (x > 0 && prev[i - 1])
-                    || (x + 1 < w && prev[i + 1])
-                    || (y > 0 && prev[i - w])
-                    || (y + 1 < h && prev[i + w]);
-            }
-        }
-    }
-    let f = Small::F as i32;
-    // Trimming the blob to dense rows/columns was tried and clipped titles off
-    // small tooltips, so the dilated blob is used as is.
-    components(&d, s.w, s.h)
-        .into_iter()
-        .filter(|(r, _)| {
-            // Navy cells inside, in the undilated mask: real tooltips have hundreds.
-            let mut n = 0;
-            for y in r.y..r.bottom() {
-                for x in r.x..r.right() {
-                    n += u32::from(mask[y as usize * w + x as usize]);
-                }
-            }
-            r.w >= 30 && r.h >= 14 && n >= 500
-        })
-        .map(|(r, _)| Rect::new(r.x * f, r.y * f, r.w * f as u32, r.h * f as u32))
-        .filter(|r| exclude.iter().all(|e| overlap(*r, *e) * 2 < r.w * r.h))
-        .collect()
 }
 
 /// A full scout frame reduced to 1/4 size, shared by all detectors.
@@ -401,7 +347,7 @@ impl Detectors {
                 continue;
             }
             let kind = match spec {
-                DetectorSpec::Tooltip { .. } => Kind::Tooltip { ocr: None },
+                DetectorSpec::Tooltip { font: f } => Kind::Tooltip { atlas: font(f, Some(&atlas_dir))?, ocr: None },
                 DetectorSpec::Damage { font: f } => {
                     Kind::Damage { atlas: font(f, Some(&atlas_dir))?, recent: Vec::new() }
                 }
@@ -443,7 +389,7 @@ impl Detectors {
                 }
             }
         }
-        Ok(Self { names, kinds, icons: IconDb::load(data_dir)? })
+        Ok(Self { names, kinds, icons: IconDb::load(data_dir)?, tooltip_cache: Default::default() })
     }
 
     pub fn names(&self) -> &[Arc<str>] {
@@ -521,60 +467,55 @@ impl Detectors {
             out.push((i, reading(i, value, 0.9, t0.elapsed().as_secs_f32() * 1000.0, &self.names)));
         }
         let exclude: Vec<Rect> = fixed.iter().chain(&windows_found).copied().collect();
-        let tooltips = if self.kinds.iter().any(|k| matches!(k, Kind::Tooltip { .. })) {
-            // Only movable windows are excluded: a tooltip may sit on top of fixed
-            // HUD panels (e.g. the quest helper); the 500-navy-cell floor already
-            // rejects those panels themselves.
-            find_tooltips(&small, &windows_found)
-        } else {
-            Vec::new()
+        // Tooltips are found by their title bullet (exact) and read on the native grid.
+        let tt_atlas =
+            self.kinds.iter().find_map(|k| if let Kind::Tooltip { atlas, .. } = k { atlas.clone() } else { None });
+        let t_tooltips = Instant::now();
+        let mut tooltips: Vec<Tooltip> = match &tt_atlas {
+            Some(a) => crate::tooltip::read_all_cached(img, a, scale, &mut self.tooltip_cache),
+            None => Vec::new(),
         };
         for i in 0..self.kinds.len() {
             let t0 = Instant::now();
             match &mut self.kinds[i] {
-                Kind::Tooltip { ocr } => {
+                Kind::Tooltip { ocr, .. } => {
                     if tooltips.is_empty() {
                         out.push((i, reading(i, Value::Hidden, 0.8, 0.0, &self.names)));
                         continue;
                     }
-                    if ocr.is_none() {
-                        *ocr = mapleocr_recog::WinOcr::new().ok();
-                    }
-                    let Some(ocr) = ocr else { continue };
-                    let items: Vec<Tooltip> = tooltips
-                        .iter()
-                        .filter_map(|&r| {
-                            let crop = img.crop(r);
-                            let prepared = mapleocr_recog::preprocess::prepare(
-                                crop,
-                                Key::Luma,
-                                mapleocr_recog::preprocess::Crop::None,
-                                16,
-                                1.0,
-                            );
-                            use mapleocr_recog::Recognizer;
-                            let rec = ocr.recognize(prepared.view()).ok()?;
-                            // The bullet before the title reads as junk; the name is the
-                            // first line with a real word after stripping it.
+                    // The glyph reader gets the title exactly. When it finds no body
+                    // lines (box width unknown: see docs/design.md), fall back to OCR.
+                    for t in tooltips.iter_mut().filter(|t| t.lines.is_empty()) {
+                        if ocr.is_none() {
+                            *ocr = mapleocr_recog::WinOcr::new().ok();
+                        }
+                        let Some(ocr) = ocr else { break };
+                        let prepared = mapleocr_recog::preprocess::prepare(
+                            img.crop(t.rect),
+                            Key::Luma,
+                            mapleocr_recog::preprocess::Crop::None,
+                            16,
+                            1.0,
+                        );
+                        use mapleocr_recog::Recognizer;
+                        if let Ok(rec) = ocr.recognize(prepared.view()) {
                             let mut lines = rec
                                 .lines
                                 .into_iter()
                                 .map(|l| l.trim_start_matches(|c: char| !c.is_alphanumeric()).trim().to_owned())
                                 .filter(|l| !l.is_empty())
-                                .peekable();
-                            while lines.peek().is_some_and(|l| l.chars().filter(|c| c.is_alphabetic()).count() < 3) {
-                                lines.next();
-                            }
-                            let name = lines.next().unwrap_or_default();
-                            Some(Tooltip { name, lines: lines.collect(), rect: r })
-                        })
-                        .collect();
-                    let v = if items.is_empty() { Value::Hidden } else { Value::Tooltips { items } };
-                    out.push((i, reading(i, v, 0.8, t0.elapsed().as_secs_f32() * 1000.0, &self.names)));
+                                .skip(1); // the title, already read exactly
+                            t.lines = lines.by_ref().collect();
+                        }
+                    }
+                    let v = Value::Tooltips { items: tooltips.clone() };
+                    // Includes locating and reading, which happen before this loop.
+                    let ms = t_tooltips.elapsed().as_secs_f32() * 1000.0;
+                    out.push((i, reading(i, v, 0.8, ms, &self.names)));
                 }
                 Kind::Damage { atlas, recent } => {
                     let Some(atlas) = atlas else { continue };
-                    let ex: Vec<Rect> = exclude.iter().chain(&tooltips).copied().collect();
+                    let ex: Vec<Rect> = exclude.iter().copied().chain(tooltips.iter().map(|t| t.rect)).collect();
                     let now = Instant::now();
                     recent.retain(|(_, _, t)| now.duration_since(*t) < HIT_MEMORY);
                     let mut hits = Vec::new();
@@ -772,23 +713,10 @@ mod tests {
     }
 
     #[test]
-    fn finds_navy_tooltip_but_not_sky_or_small_panels() {
-        let mut img = BgraImage::new(800, 600);
-        paint(&mut img, Rect::new(0, 0, 800, 600), [20, 79, 220]); // bright blue sky
-        paint(&mut img, Rect::new(100, 120, 300, 260), [74, 77, 121]); // tooltip fill
-        paint(&mut img, Rect::new(600, 40, 40, 30), [74, 77, 121]); // too small
-        let found = find_tooltips(&SmallFrame::new(img.view()), &[]);
-        assert_eq!(found.len(), 1, "{found:?}");
-        let r = found[0];
-        assert!(r.x <= 100 && r.right() >= 400 && r.y <= 120 && r.bottom() >= 380, "{r:?}");
-    }
-
-    #[test]
-    fn components_and_overlap() {
+    fn connected_components() {
         let mask = [true, true, false, false, false, false, false, false, false, false, true, true];
         let c = components(&mask, 4, 3);
         assert_eq!(c.len(), 2);
-        assert_eq!(overlap(Rect::new(0, 0, 10, 10), Rect::new(5, 5, 10, 10)), 25);
     }
 
     #[test]

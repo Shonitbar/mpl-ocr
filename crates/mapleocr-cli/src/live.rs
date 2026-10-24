@@ -247,6 +247,48 @@ pub fn read(a: ReadArgs) -> Result<()> {
     bail!("no reading for {} within {} s{}", a.roi, a.timeout_s, err.map(|e| format!(" ({e})")).unwrap_or_default())
 }
 
+#[derive(Args)]
+pub struct TooltipArgs {
+    /// Full client-area frame.
+    #[arg(long)]
+    image: PathBuf,
+    /// Print the binarized native-grid pixels of each tooltip.
+    #[arg(long)]
+    debug: bool,
+    /// Glyph font spec to read with (default: Arial 12 + 12 bold + 14 bold + 13 bold).
+    #[arg(long)]
+    font: Option<String>,
+}
+
+/// Development tool: find tooltips in a saved frame and show what the reader sees.
+pub fn tooltip_cmd(a: TooltipArgs) -> Result<()> {
+    let img = mapleocr_imgproc::load_png(&a.image)?;
+    let scale = img.height as f32 / 768.0;
+    let dir = data_dir()?.join("atlas");
+    let spec = a.font.as_deref().unwrap_or("gdi:Arial:12+gdi:Arial:12:bold+gdi:Arial:14:bold+gdi:Arial:13:bold");
+    let atlas = mapleocr_core::font(spec, Some(&dir))?.context("font")?;
+    for t in mapleocr_core::tooltip::read_all(img.view(), &atlas, scale) {
+        println!("== {:?} at {},{}", t.name, t.rect.x, t.rect.y);
+        for l in &t.lines {
+            println!("   {l}");
+        }
+    }
+    let bullets = mapleocr_core::tooltip::find_bullets(img.view(), scale);
+    println!("{} tooltip(s)", bullets.len());
+    for b in bullets {
+        let loc = mapleocr_core::tooltip::locate(img.view(), b, scale);
+        println!("bullet {:?} box {:?}", b, loc.rect);
+        if a.debug {
+            let c = mapleocr_core::tooltip::corner(b, scale);
+            let r = mapleocr_imgproc::Rect::new(c.0, c.1, 470, 470).clamp_to(img.width, img.height);
+            for (i, bm) in mapleocr_core::tooltip::prepare_variants(img.view(), r, scale).iter().enumerate() {
+                println!("variant {i}: native {}x{}", bm.w, bm.h);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 pub enum WindowCmd {
     /// Learn a movable window's title template from a saved frame where it is open.
