@@ -27,7 +27,7 @@ ctrlc = "3"
 dirs = "7"
 criterion = "0.8"
 windows = "0.62"
-serde_yaml_ng = "0.10"
+serde_norway = "0.9"
 arc-swap = "1"
 crossbeam-channel = "0.5"
 axum = { version = "0.8", features = ["ws"] }

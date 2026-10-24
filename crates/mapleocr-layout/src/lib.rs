@@ -18,7 +18,7 @@ pub const MATCH_THRESHOLD: f32 = 0.75;
 #[derive(Debug, thiserror::Error)]
 pub enum LayoutError {
     #[error("layout YAML: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    Yaml(#[from] serde_norway::Error),
     #[error("layout: {0}")]
     Invalid(String),
     #[error(transparent)]
@@ -189,7 +189,7 @@ impl FieldSpec {
 
 impl Layout {
     pub fn from_yaml(s: &str) -> Result<Self> {
-        let l: Layout = serde_yaml_ng::from_str(s)?;
+        let l: Layout = serde_norway::from_str(s)?;
         if l.schema != "mapleocr.layout/1" {
             return Err(LayoutError::Invalid(format!("unsupported schema {:?}", l.schema)));
         }
