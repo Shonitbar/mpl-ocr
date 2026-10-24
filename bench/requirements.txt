@@ -1,0 +1,6 @@
+numpy
+pillow
+opencv-python-headless
+rapidocr-onnxruntime
+easyocr
+pytesseract
