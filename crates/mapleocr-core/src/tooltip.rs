@@ -169,6 +169,9 @@ pub fn read_all_cached(img: BgraView<'_>, atlas: &Atlas, scale: f32, cache: &mut
         // for tooltips that have one. It gives the exact width even for the last tooltip.
         if let Some(sep_end) = separator_end(img, (cx, cy), scale) {
             right = right.min(sep_end + (8.3 * scale).round() as i32);
+        } else if let Some(end) = fill_edge(img, (cx, cy), right, scale) {
+            // No separator: the box ends where its dark fill does.
+            right = right.min(end - (4.0 * scale).round() as i32);
         }
         let bottom = cy + (MAX_H * scale) as i32;
         let rect =
@@ -188,6 +191,35 @@ pub fn read_all_cached(img: BgraView<'_>, atlas: &Atlas, scale: f32, cache: &mut
     out
 }
 
+/// Right edge of the box from its fill: the translucent navy keeps the top strip of the
+/// box dark (text aside) whatever shows through it, while the surroundings are light.
+/// Returns the last dark column of the strip, or `None` when the fill never ends.
+fn fill_edge(img: BgraView<'_>, (cx, cy): (i32, i32), right: i32, scale: f32) -> Option<i32> {
+    let right = right.min(img.width as i32);
+    let (y0, y1) = (cy + (4.0 * scale) as i32, (cy + (28.0 * scale) as i32).min(img.height as i32));
+    let dark = |x: i32| {
+        let n = (y0..y1)
+            .filter(|&y| {
+                let [b, g, r, _] = img.pixel(x as u32, y as u32);
+                r.min(g).min(b) < 175
+            })
+            .count() as i32;
+        n * 10 >= (y1 - y0) * 6
+    };
+    let mut miss = 0;
+    for x in cx + (40.0 * scale) as i32..right {
+        if dark(x) {
+            miss = 0;
+        } else {
+            miss += 1;
+            if miss >= 4 {
+                return Some(x - miss);
+            }
+        }
+    }
+    None
+}
+
 /// End of the separator line: a long run of near-white pixels that starts a few pixels
 /// inside the left edge, somewhere below the title.
 fn separator_end(img: BgraView<'_>, (cx, cy): (i32, i32), scale: f32) -> Option<i32> {
@@ -200,7 +232,14 @@ fn separator_end(img: BgraView<'_>, (cx, cy): (i32, i32), scale: f32) -> Option<
                 r.min(g).min(b) >= 232
             }
         };
-        let Some(x0) = (cx..cx + 24).find(|&x| white(x)) else { continue };
+        // The real separator starts 7-8 px inside the left edge (measured on every tooltip
+        // that has one); dividers of the window behind the box start elsewhere.
+        let lo = cx + (4.0 * scale / 1.5625) as i32;
+        let hi = cx + (11.0 * scale / 1.5625) as i32;
+        if !(lo..=hi).contains(&((lo..=hi).find(|&x| white(x)).unwrap_or(-1))) || white(lo - 3) {
+            continue;
+        }
+        let x0 = (lo..=hi).find(|&x| white(x)).unwrap_or(lo);
         let mut x = x0;
         while white(x) {
             x += 1;
@@ -226,6 +265,9 @@ enum Binarize {
     Adaptive,
     Banded,
 }
+
+/// Which entry of [`VARIANTS`] keeps only near-pure white (ramp from 215).
+const PURE_VARIANT: usize = 2;
 
 const VARIANTS: [(f32, Binarize); 6] = [
     (140.0, Binarize::Fixed(65.0)),
@@ -291,14 +333,49 @@ fn text_hash(img: BgraView<'_>, rect: Rect) -> u64 {
     mapleocr_imgproc::hash_pixels(&bits)
 }
 
+/// Share of a line's ink (in `bm`) that the pure-white extraction also has.
+fn white_support(bm: &Bitmap, pure: &Bitmap, line: &mapleocr_recog::glyph::ScoredLine) -> f32 {
+    let (mut ink, mut both) = (0u32, 0u32);
+    for y in line.rows.0..line.rows.1.min(bm.h) {
+        for x in line.x.0..line.x.1.min(bm.w) {
+            let i = (y * bm.w + x) as usize;
+            if bm.bits[i] {
+                ink += 1;
+                both += u32::from(pure.bits[i]);
+            }
+        }
+    }
+    if ink == 0 { 0.0 } else { both as f32 / ink as f32 }
+}
+
 /// Read a tooltip rect: every variant reads every line, and per row band the reading
 /// the font fits best wins.
 pub fn read_rect(img: BgraView<'_>, atlas: &Atlas, rect: Rect, scale: f32) -> (String, Vec<String>) {
     let t0 = std::time::Instant::now();
     let variants = prepare_variants(img, rect, scale);
     let t1 = t0.elapsed();
-    let mut candidates: Vec<mapleocr_recog::glyph::ScoredLine> =
-        variants.into_iter().flat_map(|bm| atlas.read_scored(bm)).collect();
+    // Index of the pure-white-only extraction: it contains no bleed-through at all.
+    let pure = &variants[PURE_VARIANT];
+    let mut candidates: Vec<mapleocr_recog::glyph::ScoredLine> = Vec::new();
+    for (vi, bm) in variants.iter().enumerate() {
+        for line in atlas.read_scored(bm.clone()) {
+            if std::env::var_os("MAPLEOCR_PROFILE").is_some() {
+                eprintln!(
+                    "  v{vi} rows {:?} x {:?} q {:.2} sup {:.2} {:?}",
+                    line.rows,
+                    line.x,
+                    line.quality,
+                    white_support(bm, pure, &line),
+                    line.text
+                );
+            }
+            // Genuine text is pure white; text of another window showing through the box
+            // is dimmer, so the pure-white extraction has (almost) nothing there.
+            if white_support(bm, pure, &line) >= 0.3 {
+                candidates.push(line);
+            }
+        }
+    }
     if std::env::var_os("MAPLEOCR_PROFILE").is_some() {
         eprintln!(
             "tooltip {}x{}: prepare {:?}, read {:?}, {} glyphs",
@@ -330,7 +407,17 @@ pub fn read_rect(img: BgraView<'_>, atlas: &Atlas, rect: Rect, scale: f32) -> (S
 
 /// Drop unknown-glyph junk at the ends of a line (world pixels past the box edge, cursor).
 fn clean(line: &str) -> String {
-    line.trim_matches(|c: char| c == '?' || c.is_whitespace()).to_owned()
+    let line = line.trim_matches(|c: char| c == '?' || c.is_whitespace());
+    // Arial draws capital I and lowercase l alike. No English word starts with "lm", "ln",
+    // "lf", "ls" or "lt", so a word-initial l before those is an I ("Improves", "If").
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let word_start = i == 0 || !chars[i - 1].is_alphanumeric();
+        let next = chars.get(i + 1).copied().unwrap_or(' ');
+        out.push(if c == 'l' && word_start && "mnfst".contains(next) { 'I' } else { c });
+    }
+    out
 }
 
 #[cfg(test)]

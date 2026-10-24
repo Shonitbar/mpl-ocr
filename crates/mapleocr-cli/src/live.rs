@@ -255,6 +255,9 @@ pub struct TooltipArgs {
     /// Print the binarized native-grid pixels of each tooltip.
     #[arg(long)]
     debug: bool,
+    /// With --debug: which ink extraction to print (0-5).
+    #[arg(long, default_value_t = 2)]
+    variant: usize,
     /// Glyph font spec to read with (default: Arial 12 + 12 bold + 14 bold + 13 bold).
     #[arg(long)]
     font: Option<String>,
@@ -281,8 +284,13 @@ pub fn tooltip_cmd(a: TooltipArgs) -> Result<()> {
         if a.debug {
             let c = mapleocr_core::tooltip::corner(b, scale);
             let r = mapleocr_imgproc::Rect::new(c.0, c.1, 470, 470).clamp_to(img.width, img.height);
-            for (i, bm) in mapleocr_core::tooltip::prepare_variants(img.view(), r, scale).iter().enumerate() {
-                println!("variant {i}: native {}x{}", bm.w, bm.h);
+            let variants = mapleocr_core::tooltip::prepare_variants(img.view(), r, scale);
+            for (i, bm) in variants.iter().enumerate() {
+                println!("variant {i}: native {}x{}, {} ink px", bm.w, bm.h, bm.bits.iter().filter(|&&b| b).count());
+            }
+            let bm = &variants[a.variant.min(variants.len() - 1)];
+            for row in bm.bits.chunks(bm.w.max(1) as usize).take(140) {
+                println!("{}", row.iter().take(190).map(|&b| if b { '#' } else { '.' }).collect::<String>());
             }
         }
     }
