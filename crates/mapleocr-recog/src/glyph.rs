@@ -22,6 +22,7 @@ use crate::Recognition;
 /// must not pass as a "5".
 const ACCEPT_GDI: f32 = 0.7;
 const ACCEPT_LEARNED: f32 = 0.85;
+const ACCEPT_NORMALIZED: f32 = 0.6;
 /// Ink threshold as a fraction from background to ink level. Measured: 0.4
 /// merges neighbouring status digits; 0.5 keeps them apart and still keeps
 /// 1-px sprites like the "." in "7.86%".
@@ -150,6 +151,9 @@ pub struct Atlas {
     pub glyphs: Vec<Glyph>,
     /// Minimum IoU to accept a glyph.
     pub accept: f32,
+    /// If set, every glyph and every segment is rescaled to this height before
+    /// matching. For sprites that animate in size (damage numbers).
+    pub norm_height: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,6 +161,8 @@ struct AtlasFile {
     schema: String,
     name: String,
     space: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    norm_height: Option<u32>,
     glyphs: Vec<GlyphFile>,
 }
 
@@ -174,7 +180,7 @@ pub const ATLAS_SCHEMA: &str = "mapleocr.atlas/1";
 
 impl Atlas {
     pub fn new(name: &str, space: u32) -> Self {
-        Self { name: name.into(), space, glyphs: Vec::new(), accept: ACCEPT_LEARNED }
+        Self { name: name.into(), space, glyphs: Vec::new(), accept: ACCEPT_LEARNED, norm_height: None }
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
@@ -193,7 +199,10 @@ impl Atlas {
                 Glyph { ch: g.ch, ch2: g.ch2, drop: g.drop, bitmap: Bitmap { w, h, bits } }
             })
             .collect();
-        Ok(Self { name: f.name, space: f.space, glyphs, accept: ACCEPT_LEARNED })
+        // Scale-normalized sprites vary more between instances than fixed-size
+        // ones, but have few, very different shapes (digits): accept less.
+        let accept = if f.norm_height.is_some() { ACCEPT_NORMALIZED } else { ACCEPT_LEARNED };
+        Ok(Self { name: f.name, space: f.space, glyphs, accept, norm_height: f.norm_height })
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -201,6 +210,7 @@ impl Atlas {
             schema: ATLAS_SCHEMA.into(),
             name: self.name.clone(),
             space: self.space,
+            norm_height: self.norm_height,
             glyphs: self
                 .glyphs
                 .iter()
@@ -228,7 +238,7 @@ impl Atlas {
         let space = parts.iter().map(|a| a.space).filter(|&s| s > 0).min().unwrap_or(0);
         let glyphs = parts.iter().flat_map(|a| a.glyphs.iter().cloned()).collect();
         let accept = parts.iter().map(|a| a.accept).fold(1.0f32, f32::min);
-        Atlas { name: name.into(), space, glyphs, accept }
+        Atlas { name: name.into(), space, glyphs, accept, norm_height: None }
     }
 
     /// Widest single-character glyph; wider segments are split.
@@ -281,7 +291,10 @@ impl Atlas {
         }
         let mut added = 0;
         for (s, ch) in segs.iter().zip(chars) {
-            let bitmap = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
+            let mut bitmap = bm.crop(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
+            if let Some(h) = self.norm_height {
+                bitmap = scale_to_height(&bitmap, h);
+            }
             // Keep a variant per distinct rendering (sub-pixel phase differs
             // between screen positions); skip near-duplicates.
             let known: Vec<&Glyph> = self.glyphs.iter().filter(|g| g.ch == ch && g.ch2.is_none()).collect();
@@ -298,6 +311,30 @@ impl Atlas {
             added += 1;
         }
         Ok(added)
+    }
+
+    /// Classify one isolated glyph bitmap (e.g. one connected digit blob).
+    pub fn classify(&self, glyph: &Bitmap) -> (Option<char>, f32) {
+        let (g, sim) = self.best(glyph, 0);
+        (g.filter(|_| sim >= self.accept).map(|g| g.ch), sim)
+    }
+
+    /// Add one isolated glyph as a variant of `ch` (rescaled if the atlas
+    /// normalizes). Returns false for a near-duplicate or an odd-sized one.
+    pub fn add_variant(&mut self, ch: char, glyph: Bitmap) -> bool {
+        let bitmap = match self.norm_height {
+            Some(h) => scale_to_height(&glyph, h),
+            None => glyph,
+        };
+        let known: Vec<&Glyph> = self.glyphs.iter().filter(|g| g.ch == ch && g.ch2.is_none()).collect();
+        if known.iter().map(|g| iou_shifted(&g.bitmap, &bitmap)).fold(0.0f32, f32::max) >= 0.95 {
+            return false;
+        }
+        if !known.is_empty() && !known.iter().any(|g| g.bitmap.w.abs_diff(bitmap.w) <= 3) {
+            return false;
+        }
+        self.glyphs.push(Glyph { ch, ch2: None, bitmap, drop: 0 });
+        true
     }
 
     /// Read every text line in a native-grid ink image.
@@ -396,13 +433,16 @@ impl Atlas {
     /// Best glyph for a tight segment bitmap.
     fn best(&self, seg: &Bitmap, drop: i32) -> (Option<&Glyph>, f32) {
         let mut best = (None, 0.0f32);
+        let scaled = self.norm_height.map(|h| scale_to_height(seg, h));
+        let seg = scaled.as_ref().unwrap_or(seg);
+        let tol = if self.norm_height.is_some() { 2 } else { 1 };
         for g in &self.glyphs {
             let gb = &g.bitmap;
-            if gb.w.abs_diff(seg.w) > 1 || gb.h.abs_diff(seg.h) > 1 {
+            if gb.w.abs_diff(seg.w) > tol || gb.h.abs_diff(seg.h) > tol {
                 continue;
             }
             let mut sim = iou_shifted(gb, seg);
-            if (g.drop - drop).abs() > 1 {
+            if self.norm_height.is_none() && (g.drop - drop).abs() > 1 {
                 sim -= 0.25;
             }
             if sim > best.1 {
@@ -479,6 +519,30 @@ fn push_glyph(text: &mut String, g: Option<&Glyph>) {
         }
         None => text.push('?'),
     }
+}
+
+/// Area-resample a bitmap to `h` rows, keeping its aspect ratio.
+pub fn scale_to_height(b: &Bitmap, h: u32) -> Bitmap {
+    if b.h == 0 || b.w == 0 || b.h == h {
+        return b.clone();
+    }
+    let w = ((b.w as f32 * h as f32 / b.h as f32).round() as u32).max(1);
+    let mut bits = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        let (y0, y1) = (y * b.h / h, ((y + 1) * b.h).div_ceil(h).min(b.h));
+        for x in 0..w {
+            let (x0, x1) = (x * b.w / w, ((x + 1) * b.w).div_ceil(w).min(b.w));
+            let (mut on, mut n) = (0u32, 0u32);
+            for yy in y0..y1.max(y0 + 1) {
+                for xx in x0..x1.max(x0 + 1) {
+                    on += u32::from(b.at(xx as i32, yy as i32));
+                    n += 1;
+                }
+            }
+            bits.push(on * 2 >= n.max(1));
+        }
+    }
+    Bitmap { w, h, bits }
 }
 
 /// IoU of ink with `b` shifted by (dx, dy) relative to `a`.

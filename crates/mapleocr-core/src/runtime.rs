@@ -60,6 +60,9 @@ pub struct Status {
     pub stage_ms: f64,
     /// Capture-thread time after staging: hashing, presence checks, job copies, ms.
     pub dispatch_ms: f64,
+    /// Time in the detectors (tooltip / window / damage scouting): total ms and scouts run.
+    pub detect_ms: f64,
+    pub scouts: u64,
     /// Recognition time per ROI (name, total ms, jobs).
     pub recog_ms: Vec<(Arc<str>, f64, u64)>,
 }
@@ -514,6 +517,7 @@ fn worker(
     let mut scout: Option<(Box<BgraImage>, u64, i64)> = None;
     let mut calib: Option<Calibration> = None;
     let mut recog = vec![(0.0f64, 0u64); n];
+    let (mut detect_ms, mut scouts) = (0.0f64, 0u64);
     while shared.running.load(Ordering::Acquire) {
         let first = match rx.recv_timeout(WAIT) {
             Ok(m) => m,
@@ -540,7 +544,15 @@ fn worker(
         }
         let Some(calib) = &calib else { continue };
         if let Some((image, frame_id, captured_at)) = scout.take() {
-            for (di, reading) in detectors.run(image.view(), calib, frame_id, captured_at) {
+            let t = std::time::Instant::now();
+            let found = detectors.run(image.view(), calib, frame_id, captured_at);
+            detect_ms += t.elapsed().as_secs_f64() * 1000.0;
+            scouts += 1;
+            shared.update_status(|s| {
+                s.detect_ms = detect_ms;
+                s.scouts = scouts;
+            });
+            for (di, reading) in found {
                 shared.publish(n + di, reading);
             }
         }

@@ -99,7 +99,7 @@ rois:
     recognizer: ocr
     key: raw
     parse: lines
-    min_interval_ms: 300      # translucent: pixels change every frame
+    min_interval_ms: 500      # translucent: pixels change every frame
 
   # Quest helper: dark Arial 11 (titles bold) on a light translucent panel.
   quest_helper:

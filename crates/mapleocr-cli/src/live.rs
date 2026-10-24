@@ -177,6 +177,14 @@ pub fn watch(a: WatchArgs) -> Result<()> {
         pct(s.stage_ms),
         pct(s.dispatch_ms)
     );
+    if s.scouts > 0 {
+        eprintln!(
+            "  detectors: {:.1}% of one core ({} scouts, {:.1} ms each)",
+            pct(s.detect_ms),
+            s.scouts,
+            s.detect_ms / s.scouts as f64
+        );
+    }
     let mut by_roi = s.recog_ms.clone();
     by_roi.sort_by(|a, b| b.1.total_cmp(&a.1));
     for (name, ms, n) in by_roi.iter().filter(|r| r.2 > 0) {

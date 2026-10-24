@@ -20,7 +20,7 @@ use crate::{Error, Result};
 /// Minimum NCC for a window's title template.
 const WINDOW_THRESHOLD: f32 = 0.8;
 /// Full-frame window search at most this often; otherwise re-check the last position.
-const FULL_SEARCH_EVERY: Duration = Duration::from_millis(1500);
+const FULL_SEARCH_EVERY: Duration = Duration::from_millis(2500);
 /// A damage number with the same text near the same place within this time is the same hit.
 const HIT_MEMORY: Duration = Duration::from_millis(1500);
 
@@ -144,14 +144,21 @@ impl Small {
     fn new(img: BgraView<'_>) -> Self {
         let (w, h) = (img.width / Self::F, img.height / Self::F);
         let mut rgb = vec![[0.0f32; 3]; (w * h) as usize];
+        // Four source pixels per output cell: sum integers per 4-pixel group
+        // (no per-pixel division), then accumulate the group into its cell.
         for y in 0..h * Self::F {
             let row = img.row(y);
             let out = &mut rgb[((y / Self::F) * w) as usize..((y / Self::F + 1) * w) as usize];
-            for (x, px) in row.as_chunks::<4>().0.iter().take((w * Self::F) as usize).enumerate() {
-                let o = &mut out[x / Self::F as usize];
-                o[0] += px[2] as f32;
-                o[1] += px[1] as f32;
-                o[2] += px[0] as f32;
+            for (o, group) in out.iter_mut().zip(row.as_chunks::<16>().0) {
+                let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+                for px in group.as_chunks::<4>().0 {
+                    r += px[2] as u32;
+                    g += px[1] as u32;
+                    b += px[0] as u32;
+                }
+                o[0] += r as f32;
+                o[1] += g as f32;
+                o[2] += b as f32;
             }
         }
         let n = (Self::F * Self::F) as f32;
@@ -295,8 +302,40 @@ fn damage_mask(px: [u8; 4]) -> bool {
     r >= 200 && b <= 90 && r as i32 - b as i32 >= 140 && g >= 40
 }
 
+/// Damage digits are ringed by a white line and then a black one; orange
+/// scenery (mushroom caps, buttons) is not. Looks at the 5 px band around the box.
+fn outlined(img: BgraView<'_>, r: Rect) -> bool {
+    let band = 5;
+    let outer =
+        Rect::new(r.x - band, r.y - band, r.w + 2 * band as u32, r.h + 2 * band as u32).clamp_to(img.width, img.height);
+    let (mut white, mut dark, mut total) = (0u32, 0u32, 0u32);
+    for y in outer.y..outer.bottom() {
+        for x in outer.x..outer.right() {
+            let inside = x >= r.x && x < r.right() && y >= r.y && y < r.bottom();
+            if inside {
+                continue;
+            }
+            let [b, g, rr, _] = img.pixel(x as u32, y as u32);
+            total += 1;
+            white += u32::from(rr >= 215 && g >= 215 && b >= 205);
+            dark += u32::from(rr <= 50 && g <= 50 && b <= 50);
+        }
+    }
+    total > 0 && white * 100 >= total * 8 && dark * 100 >= total * 8
+}
+
+/// A damage number: its box and its digit blobs, left to right.
+pub struct DamageNumber {
+    pub rect: Rect,
+    pub digits: Vec<Rect>,
+}
+
 /// Damage-number candidates: groups of digit-sized orange blobs in a row.
 pub fn find_damage(img: BgraView<'_>, exclude: &[Rect], scale: f32) -> Vec<Rect> {
+    find_damage_numbers(img, exclude, scale).into_iter().map(|n| n.rect).collect()
+}
+
+pub fn find_damage_numbers(img: BgraView<'_>, exclude: &[Rect], scale: f32) -> Vec<DamageNumber> {
     let (w, h) = (img.width, img.height);
     let mut mask = vec![false; (w * h) as usize];
     for y in 0..h {
@@ -311,28 +350,38 @@ pub fn find_damage(img: BgraView<'_>, exclude: &[Rect], scale: f32) -> Vec<Rect>
         }
     }
     // Digit-sized blobs (native 8-30 px tall), not big orange scenery.
-    let (min_h, max_h) = ((8.0 * scale) as u32, (30.0 * scale) as u32);
+    // Damage digits are 35-48 px tall at x1.56 UI scale (22-31 native); smaller
+    // orange things are snail shells, flowers and stray fragments.
+    let (min_h, max_h) = ((20.0 * scale) as u32, (34.0 * scale) as u32);
     let mut digits: Vec<Rect> = components(&mask, w, h)
         .into_iter()
         .filter(|(r, n)| r.h >= min_h && r.h <= max_h && r.w >= 3 && r.w <= r.h * 3 / 2 && *n * 5 >= r.w * r.h)
         .map(|(r, _)| r)
+        .filter(|r| outlined(img, *r))
         .collect();
     digits.sort_by_key(|r| (r.y / 8, r.x));
     // Group horizontally adjacent digits of similar height into numbers.
-    let mut numbers: Vec<Rect> = Vec::new();
+    let mut numbers: Vec<DamageNumber> = Vec::new();
     for d in digits {
         match numbers.iter_mut().find(|n| {
-            (d.x - n.right()).abs() <= (d.h / 2) as i32
-                && (d.y - n.y).abs() <= (d.h / 3) as i32
-                && d.h.abs_diff(n.h) <= d.h / 3
+            let r = n.rect;
+            // Looser limits (tried: gap h, dy h/2) glued stray blobs onto numbers.
+            (d.x - r.right()).abs() <= (d.h / 2) as i32
+                && (d.y - r.y).abs() <= (d.h / 3) as i32
+                && d.h.abs_diff(r.h) <= d.h / 3
         }) {
             Some(n) => {
-                let (x0, y0) = (n.x.min(d.x), n.y.min(d.y));
-                let (x1, y1) = (n.right().max(d.right()), n.bottom().max(d.bottom()));
-                *n = Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32);
+                let r = n.rect;
+                let (x0, y0) = (r.x.min(d.x), r.y.min(d.y));
+                let (x1, y1) = (r.right().max(d.right()), r.bottom().max(d.bottom()));
+                n.rect = Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32);
+                n.digits.push(d);
             }
-            None => numbers.push(d),
+            None => numbers.push(DamageNumber { rect: d, digits: vec![d] }),
         }
+    }
+    for n in &mut numbers {
+        n.digits.sort_by_key(|d| d.x);
     }
     numbers
 }
@@ -529,12 +578,24 @@ impl Detectors {
                     let now = Instant::now();
                     recent.retain(|(_, _, t)| now.duration_since(*t) < HIT_MEMORY);
                     let mut hits = Vec::new();
-                    for r in find_damage(img, &ex, scale) {
-                        let rec = atlas.read_bitmap(Bitmap::from_mask(&damage_ink(img, r)));
-                        let Some(text) = rec.lines.into_iter().next() else { continue };
-                        let known = text.chars().filter(|c| c.is_ascii_digit()).count();
-                        if known * 2 < text.chars().count() {
-                            continue; // mostly unknown shapes: scenery, not a number
+                    for num in find_damage_numbers(img, &ex, scale) {
+                        let r = num.rect;
+                        // Each digit is its own connected blob (the outline separates
+                        // neighbours), so classify blobs one by one. A scenery blob
+                        // never matches every digit shape; a number with an unknown
+                        // digit is dropped rather than guessed.
+                        let mut text = String::new();
+                        for d in &num.digits {
+                            match atlas.classify(&Bitmap::from_mask(&damage_ink(img, *d))) {
+                                (Some(c), _) if c.is_ascii_digit() => text.push(c),
+                                _ => {
+                                    text.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        if text.is_empty() {
+                            continue;
                         }
                         let c = (r.x + r.w as i32 / 2, r.y + r.h as i32 / 2);
                         let seen = recent

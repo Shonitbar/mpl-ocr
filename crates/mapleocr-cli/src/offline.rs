@@ -384,31 +384,62 @@ pub fn atlas(cmd: AtlasCmd) -> Result<()> {
             let img = load_png(&image).with_context(|| format!("loading {}", image.display()))?;
             let layout = Layout::builtin();
             let calib = calibrate(&layout, img.view(), None);
-            let found = mapleocr_core::detect::find_damage(img.view(), &[], calib.scale);
-            for r in &found {
-                println!("candidate at {},{} {}x{}", r.x, r.y, r.w, r.h);
+            let found = mapleocr_core::detect::find_damage_numbers(img.view(), &[], calib.scale);
+            let known = mapleocr_core::Atlas::load(&dir.join("damage_digits.json")).ok();
+            for n in &found {
+                let read = known.as_ref().map(|a| {
+                    let s: String = n
+                        .digits
+                        .iter()
+                        .map(|d| {
+                            let bm =
+                                mapleocr_core::Bitmap::from_mask(&mapleocr_core::detect::damage_ink(img.view(), *d));
+                            a.classify(&bm).0.unwrap_or('?')
+                        })
+                        .collect();
+                    format!(" -> {s}")
+                });
+                let r = n.rect;
+                println!(
+                    "candidate at {},{} {}x{} ({} digits){}",
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    n.digits.len(),
+                    read.unwrap_or_default()
+                );
             }
             if list {
                 return Ok(());
             }
-            let r = match (found.as_slice(), at) {
-                ([r], _) => r,
+            let n = match (found.as_slice(), at) {
+                ([n], _) => n,
                 (_, Some((x, y))) => found
                     .iter()
-                    .min_by_key(|r| (r.x + r.w as i32 / 2 - x).abs() + (r.y + r.h as i32 / 2 - y).abs())
+                    .min_by_key(|n| {
+                        (n.rect.x + n.rect.w as i32 / 2 - x).abs() + (n.rect.y + n.rect.h as i32 / 2 - y).abs()
+                    })
                     .context("no candidates")?,
                 _ => bail!("found {} candidates; pass --at x,y to pick one (see --list)", found.len()),
             };
-            let ink = mapleocr_core::detect::damage_ink(img.view(), *r);
+            let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+            if chars.len() != n.digits.len() {
+                bail!("found {} digit blobs but the label has {} characters", n.digits.len(), chars.len());
+            }
             let path = dir.join("damage_digits.json");
             let mut atlas = if path.exists() {
                 mapleocr_core::Atlas::load(&path)?
             } else {
                 mapleocr_core::Atlas::new("damage_digits", 0)
             };
-            let added = atlas
-                .learn_bitmap(mapleocr_core::Bitmap::from_mask(&ink), &text)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Damage numbers pop in size as they animate: match scale-free.
+            atlas.norm_height = Some(24);
+            let mut added = 0;
+            for (d, ch) in n.digits.iter().zip(chars) {
+                let ink = mapleocr_core::detect::damage_ink(img.view(), *d);
+                added += usize::from(atlas.add_variant(ch, mapleocr_core::Bitmap::from_mask(&ink)));
+            }
             atlas.save(&path)?;
             println!("damage_digits: +{added} glyphs -> {}", path.display());
         }
