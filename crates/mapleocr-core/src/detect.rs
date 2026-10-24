@@ -245,6 +245,8 @@ pub fn find_tooltips(small: &SmallFrame, exclude: &[Rect]) -> Vec<Rect> {
         }
     }
     let f = Small::F as i32;
+    // Trimming the blob to dense rows/columns was tried and clipped titles off
+    // small tooltips, so the dilated blob is used as is.
     components(&d, s.w, s.h)
         .into_iter()
         .filter(|(r, _)| {
@@ -471,7 +473,10 @@ impl Detectors {
         }
         let exclude: Vec<Rect> = fixed.iter().chain(&windows_found).copied().collect();
         let tooltips = if self.kinds.iter().any(|k| matches!(k, Kind::Tooltip { .. })) {
-            find_tooltips(&small, &exclude)
+            // Only movable windows are excluded: a tooltip may sit on top of fixed
+            // HUD panels (e.g. the quest helper); the 500-navy-cell floor already
+            // rejects those panels themselves.
+            find_tooltips(&small, &windows_found)
         } else {
             Vec::new()
         };
