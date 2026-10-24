@@ -238,6 +238,11 @@ Latency comes first, so the yield window stays. Remaining cost is mostly chat
 OCR (~14 ms per read, ≤ 3.3 Hz). The 10%-of-a-core target is slightly exceeded
 with every ROI on.
 
+After the detectors were added (a full-frame scout every 250 ms): everything on
+is ~19% of one core (detectors 5%, chat OCR ~4%, capture ~6%, quest helper
+~1%); status bar + map only is ~6%. The 10% target holds for the HUD readers,
+not for everything at once.
+
 ### Detectors: UI without a fixed position
 A low-rate "scout" (every 250 ms) copies the full client frame and runs the
 detectors on it; fixed ROIs never wait for it.
@@ -258,14 +263,28 @@ detectors on it; fixed ROIs never wait for it.
   4x4x RGB color descriptor (48 hex digits) matched by L1 distance against your
   local icon database (`mapleocr window name-icon`). 22 of 22 icons in one
   inventory had distinct descriptors; a gradient hash gave 4 identical ones.
-- **Damage numbers** (beta): orange-mask blobs, matched against a
-  `learned:damage_digits` atlas; blobs whose shapes are not digits are dropped.
-  Taught from two frames, it read "6?" for "66": touching digits and orange
-  scenery still need work. Not yet reliable.
+- **Damage numbers** (beta): orange-mask blobs that are damage-sized (35-48 px
+  tall at x1.56) and ringed by a white then a black outline (scenery such as
+  mushroom caps and snail shells lacks the ring). Each digit is its own connected
+  blob, because the outline separates neighbours, so blobs are classified one by
+  one against a scale-normalized atlas (every digit resized to 24 px high; the
+  sprites animate in size). Reading the number as a bitmap and cutting it by
+  columns failed because digits overlap horizontally: 4 of 20 held-out numbers.
+  Per-blob classification: **18 of 20 held-out numbers exactly right** (the
+  atlas was taught from 15 other numbers of the same session), 1 wrong
+  (101 read as 10), 1 missed. In 40 frames without large damage numbers there
+  were 30 hits, all of them real digits; none came from scenery. Known issue:
+  digits that bounce apart can be reported as separate one-digit hits instead of
+  one number. Taught with `mapleocr atlas learn-damage`.
 
 Known gaps: mesos (OCR reads only the first digit group), item quantities in
 slots (need a taught `slot_digits` atlas), quest helper bold titles over dark
 scenery, equipment/stat/skill windows (same `window` detector, not yet configured).
+
+### Data from live play
+150 frames captured while playing (one every 2.5 s, 6 minutes): HP, MP, EXP and
+level read in all 150 with no unknown glyph, and 8 randomly chosen frames
+checked by eye were exactly right (24 of 24 values).
 
 ## Server
 

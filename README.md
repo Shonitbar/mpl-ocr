@@ -12,7 +12,7 @@ tooltips, chat, and more. Screen pixels in, structured readings out.
 **Status: prototype.** Readable today: map name, level, job, character name,
 HP, MP, EXP, NPC dialogue, item tooltips (name + text), the item inventory
 window (item icons, optionally named by you), quest helper (beta), chat (beta),
-damage numbers (beta, needs teaching), and an opt-in whole-screen text scan.
+damage numbers (beta: 18 of 20 held-out numbers right, needs teaching), and an opt-in whole-screen text scan.
 Other movable windows (equipment, stats, skills) reuse the same window
 detector and are next. Use it from Rust, or from any language or web UI via
 the local server (`mapleocr serve`, see [docs/protocol.md](docs/protocol.md)).
