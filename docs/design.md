@@ -247,14 +247,35 @@ not for everything at once.
 A low-rate "scout" (every 250 ms) copies the full client frame and runs the
 detectors on it; fixed ROIs never wait for it.
 
-- **Tooltips**: the translucent navy fill has a consistent color
-  (R,G ~70-85, B ~113-135) over any background. Match it on the 1/4 frame,
-  dilate 3 cells to bridge text and icons, keep components with at least 500
-  navy cells. A border-based detector failed because the bevel changes with the
-  background, and a loose color test matched blue sky. Text goes to Windows OCR
-  (the glyph reader cannot split lines that share rows with the icon). Item
-  names read correctly on 3 of 3 frames with tooltips; the second tooltip of a
-  comparison pair is sometimes merged into the first.
+- **Tooltips** (item and skill; both use the same frame): found by the **title
+  bullet**, a 7x7 px opaque sprite of one exact color (R~85, G~208, B~255) that
+  sits at a fixed offset from the box corner. Unlike the translucent navy fill
+  (which any dark blue sky also matches), it does not depend on what is behind
+  the tooltip: 6 of 6 tooltips found at the exact pixel, none in frames without one.
+  The first attempt (navy color + dilation + OCR) found names 4 of 5 times and was
+  replaced.
+  Reading: the box width comes from the next tooltip's corner, or from the white
+  separator under the header (it ends 13 px before the right edge; item
+  tooltips are all 369 px wide, skill tooltips grow to ~666 px). The icon frame is
+  erased, then the region is resampled onto the native grid and read with the
+  glyph matcher (Arial 12 regular/bold + 14 bold, built locally with GDI).
+  Because the box is translucent, the right binarization depends on what is
+  behind it, so each tooltip is read under 6 ink extractions and, per text
+  line, the reading the font fits best wins (quality = sum of glyph
+  similarities minus one point per unknown glyph). A reading is cached while
+  the text pixels do not change. Cost: 20-30 ms to prepare, 10-60 ms to read.
+  Matching uses popcounts on packed glyph rows, which also made every glyph
+  reader about 2x faster.
+  **Measured, against hand-labeled lines on the 6 distinct tooltips I have:
+  names exact 5 of 6, text lines exact 15 of 25 (60%).** This is not good
+  enough and is the main open item. Known failure classes: (1) red and gray
+  text (the "-1" in "Weapon Def.: +5 (6 -1)", the REQ block) is invisible to
+  the white-text key; (2) other UI showing through a tooltip that sits over a
+  bright panel (the second tooltip in frame 5 over the quest helper: 0 of 4);
+  (3) a few glyph confusions ("At" in "Attacks", a stray "l" after "Hat",
+  "Remaining" with one unknown glyph); (4) the cursor covering text.
+  The sample is far too small to claim any rate; a hover session across item
+  types is needed (see "Tooltip plan" below).
 - **Windows** (`kind: window`): a learned title template. The 1/4-frame search
   returns the 6 best candidates (a thin title strip alone matches the wrong
   place), each verified at full resolution. Re-checked at its last position
@@ -280,6 +301,16 @@ detectors on it; fixed ROIs never wait for it.
 Known gaps: mesos (OCR reads only the first digit group), item quantities in
 slots (need a taught `slot_digits` atlas), quest helper bold titles over dark
 scenery, equipment/stat/skill windows (same `window` detector, not yet configured).
+
+### Tooltip plan
+1. Collect a hover session (`mapleocr capture-dataset --hotkey F9`): equipment,
+   use/etc/cash items, skills, shop and NPC tooltips, over bright and dark
+   backgrounds, cursor away from the text.
+2. Label from the reader's own output (verify against the crop, do not type from
+   scratch), freeze as `labels` with `expect.tooltips`, and gate CI on
+   exact-line accuracy.
+3. Fix by failure class, highest count first: colored text keys, bleed-through
+   rejection, glyph confusions, REQ block and job tags (color, not OCR).
 
 ### Data from live play
 150 frames captured while playing (one every 2.5 s, 6 minutes): HP, MP, EXP and

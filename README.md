@@ -10,7 +10,8 @@ tooltips, chat, and more. Screen pixels in, structured readings out.
 > [DISCLAIMER.md](DISCLAIMER.md).
 
 **Status: prototype.** Readable today: map name, level, job, character name,
-HP, MP, EXP, NPC dialogue, item tooltips (name + text), the item inventory
+HP, MP, EXP, NPC dialogue, item and skill tooltips (beta: names mostly right, stat
+lines about 60% exact so far), the item inventory
 window (item icons, optionally named by you), quest helper (beta), chat (beta),
 damage numbers (beta: 18 of 20 held-out numbers right, needs teaching), and an opt-in whole-screen text scan.
 Other movable windows (equipment, stats, skills) reuse the same window

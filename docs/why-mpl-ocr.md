@@ -31,15 +31,21 @@ Python engines (they get the exact HP crop, padded and upscaled 2x).
 | RapidOCR | 8 / 12 |
 | Tesseract | 3 / 12 |
 
-**Item tooltips from a full frame** (3 frames, 5 item names; mpl-ocr finds the
-tooltip box itself, the Python engines read the whole screen):
+**Item tooltips from a full frame** (3 frames, 5 item names; mpl-ocr finds each
+tooltip by its title bullet, the Python engines read the whole screen):
 
 | engine | time | names found |
 |---|---|---|
-| **mpl-ocr** | **63 ms** | **5 / 5** |
-| Tesseract | 1.1 s (17x slower) | 5 / 5 |
-| RapidOCR | 2.3 s (36x slower) | 4 / 5 |
-| EasyOCR (CPU) | 12.6 s (**200x slower**) | 5 / 5 |
+| **mpl-ocr** | **~60-100 ms** (first read; cached while the tooltip stays up) | 4 / 5 |
+| Tesseract | 1.1 s (11-17x slower) | 5 / 5 |
+| RapidOCR | 2.3 s (23-38x slower) | 4 / 5 |
+| EasyOCR (CPU) | 12.6 s (**125-200x slower**) | 5 / 5 |
+
+Tooltip accuracy is **not yet where it needs to be**: against hand-labeled lines,
+mpl-ocr gets 5 of 6 names and 15 of 25 text lines exactly right (the Python engines
+were scored only on whether the name appears anywhere, a more lenient test).
+The speed is real; the accuracy work is in progress (see
+[docs/design.md](design.md)).
 
 **Finding the HP number anywhere on a 1920x1200 frame** (5 frames): RapidOCR
 3.7 s (5/5), Tesseract 1.1 s (0/5), EasyOCR 12.7 s (0/5). mpl-ocr does not
@@ -68,7 +74,7 @@ Stable = accuracy checked on held-out frames. Beta = works, with known gaps.
 | **EXP** value and percent | stable | EXP/hour trackers, leveling analytics |
 | **Level, job, character name** | stable | multi-character dashboards |
 | **Map name** (snaps to your own map list) | stable | OBS scene switching, per-map stats, location logs |
-| **Item tooltips** (item name + text, finds the box anywhere) | stable on tested frames | price-lookup overlays, item databases, loot logs |
+| **Item tooltips** (item name + stat lines, finds the box anywhere) | **beta**: 5/6 names, ~60% of lines exact | price-lookup overlays, item databases, loot logs |
 | **Inventory window** (finds it wherever you drag it; item icons recognized once you name them) | stable for detection, you name the icons | inventory trackers, drop logs, meso/item history |
 | **NPC dialogue** (name, text, selectable options; reads only while open) | stable on tested frames | dialogue translation, quest guides, text-to-speech |
 | **Damage numbers** | beta (18 of 20 held-out numbers right) | damage meters, DPS logging |
